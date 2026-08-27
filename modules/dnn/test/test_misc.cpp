@@ -1068,4 +1068,99 @@ TEST(Net, ShapeUtils_total_no_int32_overflow)
     EXPECT_EQ(t, 2839019520llu);
 }
 
+// Regression test for https://github.com/opencv/opencv/issues/17944
+// DNN fusion must not fuse an intermediate layer whose output blob is in pinsToKeep
+// (i.e. explicitly requested by the user via forward()).
+//
+// Network: Input -> Conv -> BN -> ReLU
+// When both "bn" and "relu" outputs are requested, the BN output blob must
+// survive the Conv+BN+ReLU fusion pass without being overwritten by ReLU's blob.
+TEST(Net, FusionRespectsIntermediateOutputPins_17944)
+{
+    // Single-channel 1x1 convolution identity: output == input
+    const int C = 1;
+    const int H = 4, W = 4;
+
+    // --- Conv layer (1-channel, 1x1 kernel, weight=1, no bias) ---
+    LayerParams convParams;
+    convParams.type = "Convolution";
+    convParams.name = "conv";
+    convParams.set("kernel_w", 1);
+    convParams.set("kernel_h", 1);
+    convParams.set("pad_w", 0);
+    convParams.set("pad_h", 0);
+    convParams.set("stride_w", 1);
+    convParams.set("stride_h", 1);
+    convParams.set("num_output", C);
+    convParams.set("bias_term", false);
+    Mat convWeight(std::vector<int>{C, C, 1, 1}, CV_32F, Scalar(1.0f));
+    convParams.blobs.push_back(convWeight);
+
+    // --- BatchNorm layer ---
+    // BN formula: out = (in - mean) / sqrt(var + eps) * scale + bias
+    // With mean=0, var=1, scale=1, bias=-10:
+    //   out = in / sqrt(1 + eps) - 10  ~  in - 10
+    // For input=1.0: BN output ~= -9.0  (negative -- ReLU would zero this out)
+    LayerParams bnParams;
+    bnParams.type = "BatchNorm";
+    bnParams.name = "bn";
+    bnParams.set("has_weight", false);
+    bnParams.set("has_bias", true);
+    bnParams.set("eps", 1e-5f);
+    // blobs: [0]=mean, [1]=variance, [2]=bias  (no separate scale when has_weight=false)
+    Mat bnMean(1, C, CV_32F, Scalar(0.0f));
+    Mat bnVar(1, C, CV_32F, Scalar(1.0f));
+    Mat bnBias(1, C, CV_32F, Scalar(-10.0f));
+    bnParams.blobs.push_back(bnMean);
+    bnParams.blobs.push_back(bnVar);
+    bnParams.blobs.push_back(bnBias);
+
+    // --- ReLU layer ---
+    LayerParams reluParams;
+    reluParams.type = "ReLU";
+    reluParams.name = "relu";
+
+    // Build: input(0) -> conv -> bn -> relu
+    Net net;
+    int convId = net.addLayer(convParams.name, convParams.type, convParams);
+    net.connect(0, 0, convId, 0);  // input -> conv
+    int bnId = net.addLayer(bnParams.name, bnParams.type, bnParams);
+    net.connect(convId, 0, bnId, 0);  // conv -> bn
+    int reluId = net.addLayer(reluParams.name, reluParams.type, reluParams);
+    net.connect(bnId, 0, reluId, 0);  // bn -> relu
+
+    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+    net.setPreferableTarget(DNN_TARGET_CPU);
+
+    // All-ones input: conv output = 1.0, BN output ~= -9.0, ReLU output = 0.0
+    int inpSz[] = {1, C, H, W};
+    Mat input(4, inpSz, CV_32F, Scalar(1.0f));
+    net.setInput(input);
+
+    // Request both bn and relu outputs to exercise pinsToKeep
+    std::vector<Mat> outs;
+    net.forward(outs, std::vector<String>{"bn", "relu"});
+
+    ASSERT_EQ(2u, outs.size());
+    Mat bnOut   = outs[0];
+    Mat reluOut = outs[1];
+
+    ASSERT_FALSE(bnOut.empty())   << "BN output blob is empty -- fusion erased it";
+    ASSERT_FALSE(reluOut.empty()) << "ReLU output blob is empty";
+
+    // BN output must contain negative values (~-9.0); ReLU output must be all zeros.
+    // Without the fix, fusion overwrites BN's blob with ReLU's, making both zero.
+    double bnMin, bnMax;
+    cv::minMaxLoc(bnOut, &bnMin, &bnMax);
+    EXPECT_LT(bnMin, -1.0) << "BN output should be negative (~-9); got min=" << bnMin;
+
+    double reluMin, reluMax;
+    cv::minMaxLoc(reluOut, &reluMin, &reluMax);
+    EXPECT_NEAR(reluMax, 0.0, 1e-4) << "ReLU output should be 0 (clamped from negative); got max=" << reluMax;
+
+    // Extra: ensure the two blobs are NOT the same (they must not share storage after the fix)
+    EXPECT_GT(cv::norm(bnOut - reluOut, NORM_INF), 1.0)
+        << "BN and ReLU outputs must differ; fusion incorrectly shared/overwrote the intermediate blob";
+}
+
 }} // namespace

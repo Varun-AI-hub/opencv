@@ -89,6 +89,10 @@ void Net::Impl::fuseLayers(const std::vector<LayerPin>& blobsToKeep_)
                 if (preferableBackend == DNN_BACKEND_CUDA && ld.type == "Convolution" &&
                         (nextData->type == "Eltwise" || nextData->type == "NaryEltwise"))
                     break;
+                // issue #17944: do not fuse when the intermediate layer's output blob is
+                // required by another branch or has been explicitly requested by the user.
+                if (pinsToKeep.count(lpNext) != 0)
+                    break;
                 Ptr<Layer> nextLayer = nextData->layerInstance;
                 if (currLayer->tryFuse(nextLayer))
                 {
@@ -165,6 +169,10 @@ void Net::Impl::fuseLayers(const std::vector<LayerPin>& blobsToKeep_)
                         break;
                 }
 
+                // issue #17944: do not fuse activation when the intermediate layer's output
+                // blob must be preserved (requested by user or consumed by another branch).
+                if (pinsToKeep.count(lpNext) != 0)
+                    break;
                 if (currLayer->setActivation(nextActivLayer))
                 {
                     printf_(("\tfused with %s\n", nextActivLayer->name.c_str()));
