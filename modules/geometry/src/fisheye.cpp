@@ -324,8 +324,13 @@ static inline double solveThetaFromThetaD(double theta_d, const Vec4d& k, int ma
     {
         double theta2 = theta*theta, theta4 = theta2*theta2, theta6 = theta4*theta2, theta8 = theta6*theta2;
         double k0_theta2 = k[0] * theta2, k1_theta4 = k[1] * theta4, k2_theta6 = k[2] * theta6, k3_theta8 = k[3] * theta8;
+        // Guard the Newton denominator against zero to prevent NaN when the
+        // distortion polynomial derivative vanishes (e.g. large negative k[0]).
+        double denom = 1 + 3*k0_theta2 + 5*k1_theta4 + 7*k2_theta6 + 9*k3_theta8;
+        if (fabs(denom) < DBL_EPSILON)
+            break;
         double theta_fix = (theta * (1 + k0_theta2 + k1_theta4 + k2_theta6 + k3_theta8) - theta_d) /
-                           (1 + 3*k0_theta2 + 5*k1_theta4 + 7*k2_theta6 + 9*k3_theta8);
+                           denom;
         theta = theta - theta_fix;
 
         if (isEps && (fabs(theta_fix) < epsilon))
@@ -425,6 +430,7 @@ void cv::fisheye::undistortPoints( InputArray distorted, OutputArray undistorted
                 const v_float64 v_seven = vx_setall_f64(7.0), v_nine = vx_setall_f64(9.0);
                 const v_float64 v_lo = vx_setall_f64(-CV_PI/2.), v_hi = vx_setall_f64(CV_PI/2.);
                 const v_float64 v_sent = vx_setall_f64(-1000000.0);
+                const v_float64 v_dbl_eps = vx_setall_f64(DBL_EPSILON);
                 AutoBuffer<double> tbuf(vl);
 
                 for( size_t block = blockBegin; block < blockEnd; block++ )
@@ -437,7 +443,6 @@ void cv::fisheye::undistortPoints( InputArray distorted, OutputArray undistorted
                     v_float64 theta_d = v_sqrt(v_add(v_mul(pwx, pwx), v_mul(pwy, pwy)));
                     theta_d = v_min(v_max(theta_d, v_lo), v_hi);
                     v_float64 theta = theta_d;
-
                     for( int it = 0; it < maxCount; it++ )
                     {
                         v_float64 t2 = v_mul(theta, theta), t4 = v_mul(t2, t2);
@@ -449,13 +454,20 @@ void cv::fisheye::undistortPoints( InputArray distorted, OutputArray undistorted
                         v_float64 den = v_add(v_one, v_add(
                             v_add(v_mul(a0, v_three), v_mul(a1, v_five)),
                             v_add(v_mul(a2, v_seven), v_mul(a3, v_nine))));
-                        theta = v_sub(theta, v_div(num, den));
+                        // Guard: if the Newton denominator is near zero, skip the
+                        // step for that lane to prevent NaN from propagating.
+                        v_float64 theta_fix = v_select(v_gt(v_abs(den), v_dbl_eps),
+                                                       v_div(num, den), v_zero);
+                        theta = v_sub(theta, theta_fix);
                     }
 
                     // scale = tan(theta) / theta_d  (scalar pass; there is no vector transcendental)
                     v_store(tbuf.data(), theta);
                     for( int lane = 0; lane < vl; lane++ ) tbuf[lane] = std::tan(tbuf[lane]);
-                    v_float64 scale = v_div(vx_load(tbuf.data()), theta_d);
+                    // L'Hopital limit: tan(theta)/theta_d -> 1 as theta_d -> 0
+                    v_float64 scale = v_select(v_gt(theta_d, v_dbl_eps),
+                                               v_div(vx_load(tbuf.data()), theta_d),
+                                               v_one);
                     v_float64 pux = v_mul(pwx, scale), puy = v_mul(pwy, scale);
 
                     // theta_d is non-negative, so a sign flip is exactly theta < 0.
@@ -522,11 +534,14 @@ void cv::fisheye::undistortPoints( InputArray distorted, OutputArray undistorted
             // a = x' * r / theta_d, b = y' * r / theta_d =>
             // (theta = atan(r) => r = tan(theta), scale := r / theta_d = tan(theta) / theta_d)
             // a = x' * scale, b = y' * scale
-            scale = std::tan(theta) / theta_d;
+            // Guard against division by zero (L'Hopital limit: scale -> 1 as theta_d -> 0).
+            scale = (fabs(theta_d) > DBL_EPSILON) ? std::tan(theta) / theta_d : 1.0;
         }
         else
         {
             converged = true;
+            // L'Hopital limit: tan(theta)/theta_d -> 1 as theta_d -> 0
+            scale = 1.0;
         }
 
         // theta is monotonously increasing or decreasing depending on the sign of theta
@@ -588,7 +603,30 @@ void cv::fisheye::estimateNewCameraMatrixForUndistortRectify(InputArray K, Input
     pptr[3] = Vec2d(0, h/2);
 
     fisheye::undistortPoints(points, points, K, D, R);
-    cv::Scalar center_mass = mean(points);
+
+    // Filter out non-converged undistorted points. undistortPoints() uses the
+    // sentinel (-1000000, -1000000) for points that did not converge, and NaN/Inf
+    // can appear when the distortion polynomial derivative vanishes mid-Newton.
+    // Exclude both so they do not corrupt the focal-length estimate.
+    const double kSentinel = -1000000.0;
+    int validCount = 0;
+    for (size_t i = 0; i < points.total(); ++i)
+    {
+        if (std::isfinite(pptr[i][0]) && std::isfinite(pptr[i][1]) &&
+            pptr[i][0] != kSentinel && pptr[i][1] != kSentinel)
+            pptr[validCount++] = pptr[i];
+    }
+    if (validCount == 0)
+    {
+        // All probe points were degenerate (e.g. extreme distortion coefficients
+        // that make the polynomial non-invertible). Return the original K so the
+        // caller receives a valid, finite matrix rather than NaN.
+        K.getMat().convertTo(P, P.empty() ? K.type() : P.type());
+        return;
+    }
+    Mat validPoints = points.colRange(0, validCount);
+
+    cv::Scalar center_mass = mean(validPoints);
     Vec2d cn(center_mass.val);
 
     double aspect_ratio = (K.depth() == CV_32F) ? K.getMat().at<float >(0,0)/K.getMat().at<float> (1,1)
@@ -596,11 +634,11 @@ void cv::fisheye::estimateNewCameraMatrixForUndistortRectify(InputArray K, Input
 
     // convert to identity ratio
     cn[1] *= aspect_ratio;
-    for(size_t i = 0; i < points.total(); ++i)
+    for(int i = 0; i < validCount; ++i)
         pptr[i][1] *= aspect_ratio;
 
     double minx = DBL_MAX, miny = DBL_MAX, maxx = -DBL_MAX, maxy = -DBL_MAX;
-    for(size_t i = 0; i < points.total(); ++i)
+    for(int i = 0; i < validCount; ++i)
     {
         miny = std::min(miny, pptr[i][1]);
         maxy = std::max(maxy, pptr[i][1]);
@@ -608,10 +646,17 @@ void cv::fisheye::estimateNewCameraMatrixForUndistortRectify(InputArray K, Input
         maxx = std::max(maxx, pptr[i][0]);
     }
 
-    double f1 = w * 0.5/(cn[0] - minx);
-    double f2 = w * 0.5/(maxx - cn[0]);
-    double f3 = h * 0.5 * aspect_ratio/(cn[1] - miny);
-    double f4 = h * 0.5 * aspect_ratio/(maxy - cn[1]);
+    // Compute per-side scale factors. Guard against zero-width/height spans
+    // which would cause division by zero: return DBL_MAX for degenerate cases
+    // so that balance=0 (fmax) yields the largest finite focal length found,
+    // and balance=1 (fmin) can detect the degenerate direction.
+    auto safeRecip = [](double num, double denom) -> double {
+        return (fabs(denom) > DBL_EPSILON) ? num / denom : DBL_MAX;
+    };
+    double f1 = safeRecip(w * 0.5, cn[0] - minx);
+    double f2 = safeRecip(w * 0.5, maxx - cn[0]);
+    double f3 = safeRecip(h * 0.5 * aspect_ratio, cn[1] - miny);
+    double f4 = safeRecip(h * 0.5 * aspect_ratio, maxy - cn[1]);
 
     double fmin = std::min(f1, std::min(f2, std::min(f3, f4)));
     double fmax = std::max(f1, std::max(f2, std::max(f3, f4)));

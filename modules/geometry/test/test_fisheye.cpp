@@ -623,6 +623,182 @@ TEST_F(fisheyeTest, undistortAndDistortImage)
         cv::imwrite(combine(datasets_repository_path, "new_distortion.png"), image_projected);
 }
 
+// Regression test for GitHub issue #23961:
+// estimateNewCameraMatrixForUndistortRectify returned NaN when extreme negative
+// k1 drove the Newton-iteration denominator to zero inside undistortPoints().
+TEST_F(fisheyeTest, estimateNewCameraMatrixNoNaN)
+{
+    // Camera where the four mid-edge probe pixels map to |theta_d| = 1.0 in
+    // normalised coordinates (fx=fy=100, cx=cy=100, image 200x200).
+    // With k1 = -1/3 the polynomial derivative at theta=1 is exactly 0,
+    // which previously caused the Newton step to diverge to NaN.
+    const cv::Size sz(200, 200);
+    const cv::Matx33d K(100.0, 0.0, 100.0,
+                         0.0, 100.0, 100.0,
+                         0.0,   0.0,   1.0);
+    // k1 = -1/3 makes the Newton denominator 1 + 3*(-1/3)*theta^2 = 0 at theta=1
+    const cv::Vec4d D(-1.0/3.0, 0.0, 0.0, 0.0);
+
+    cv::Mat Knew;
+    cv::fisheye::estimateNewCameraMatrixForUndistortRectify(K, D, sz, cv::noArray(), Knew);
+
+    ASSERT_EQ(Knew.rows, 3);
+    ASSERT_EQ(Knew.cols, 3);
+
+    // Every element of the output must be finite — no NaN, no Inf.
+    // (Before the fix this returned NaN because the Newton iteration denominator
+    // hit zero, producing NaN in scale = tan(theta)/theta_d.)
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            EXPECT_TRUE(std::isfinite(Knew.at<double>(r, c)))
+                << "Knew(" << r << "," << c << ") is not finite: "
+                << Knew.at<double>(r, c);
+
+    // Also verify with a non-empty R (tests the scalar path in undistortPoints).
+    cv::Mat R = cv::Mat::eye(3, 3, CV_64F);
+    cv::fisheye::estimateNewCameraMatrixForUndistortRectify(K, D, sz, R, Knew);
+    ASSERT_EQ(Knew.rows, 3);
+    ASSERT_EQ(Knew.cols, 3);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            EXPECT_TRUE(std::isfinite(Knew.at<double>(r, c)))
+                << "Knew(" << r << "," << c << ") is not finite (with R): "
+                << Knew.at<double>(r, c);
+}
+
+// Regression test for GitHub issue #23961 – variant with larger negative k1 and non-zero k2.
+// k1=-0.5 produces a denominator that stays non-zero but the iterative solver can still
+// drift; the guard added in the fix should keep the output finite.
+TEST_F(fisheyeTest, estimateNewCameraMatrixNoNaN_large_k1)
+{
+    const cv::Size sz(640, 480);
+    const cv::Matx33d K2(500.0, 0.0, 320.0,
+                          0.0, 500.0, 240.0,
+                          0.0,   0.0,   1.0);
+    const cv::Vec4d D2(-0.5, 0.1, 0.0, 0.0);
+
+    cv::Mat Knew;
+    cv::fisheye::estimateNewCameraMatrixForUndistortRectify(K2, D2, sz, cv::noArray(), Knew);
+
+    ASSERT_EQ(Knew.rows, 3);
+    ASSERT_EQ(Knew.cols, 3);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            EXPECT_TRUE(std::isfinite(Knew.at<double>(r, c)))
+                << "Knew(" << r << "," << c << ") is not finite: "
+                << Knew.at<double>(r, c);
+}
+
+// Regression test for GitHub issue #23961 – all four distortion coefficients non-zero.
+TEST_F(fisheyeTest, estimateNewCameraMatrixNoNaN_all_k_nonzero)
+{
+    const cv::Size sz(640, 480);
+    const cv::Matx33d K3(500.0, 0.0, 320.0,
+                          0.0, 500.0, 240.0,
+                          0.0,   0.0,   1.0);
+    const cv::Vec4d D3(-0.3, 0.05, -0.01, 0.001);
+
+    cv::Mat Knew;
+    cv::fisheye::estimateNewCameraMatrixForUndistortRectify(K3, D3, sz, cv::noArray(), Knew);
+
+    ASSERT_EQ(Knew.rows, 3);
+    ASSERT_EQ(Knew.cols, 3);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            EXPECT_TRUE(std::isfinite(Knew.at<double>(r, c)))
+                << "Knew(" << r << "," << c << ") is not finite: "
+                << Knew.at<double>(r, c);
+}
+
+// Sanity check: for a well-behaved fisheye camera (distortion near zero) the fix must
+// not degrade output.  The returned focal length should remain within 50 % of the input.
+TEST_F(fisheyeTest, estimateNewCameraMatrixNoNaN_valid_input_unchanged)
+{
+    const cv::Size sz(640, 480);
+    const double inputFx = 500.0;
+    const cv::Matx33d K4(inputFx, 0.0, 320.0,
+                          0.0, inputFx, 240.0,
+                          0.0,   0.0,    1.0);
+    const cv::Vec4d D4(0.01, 0.001, 0.0, 0.0);
+
+    cv::Mat Knew;
+    cv::fisheye::estimateNewCameraMatrixForUndistortRectify(K4, D4, sz, cv::noArray(), Knew);
+
+    ASSERT_EQ(Knew.rows, 3);
+    ASSERT_EQ(Knew.cols, 3);
+
+    // Every element must be finite.
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            EXPECT_TRUE(std::isfinite(Knew.at<double>(r, c)))
+                << "Knew(" << r << "," << c << ") is not finite: "
+                << Knew.at<double>(r, c);
+
+    // Focal lengths should be within 50 % of the input focal length.
+    const double fx_out = Knew.at<double>(0, 0);
+    const double fy_out = Knew.at<double>(1, 1);
+    EXPECT_GT(fx_out, inputFx * 0.5) << "fx dropped below 50% of input";
+    EXPECT_LT(fx_out, inputFx * 1.5) << "fx exceeded 150% of input";
+    EXPECT_GT(fy_out, inputFx * 0.5) << "fy dropped below 50% of input";
+    EXPECT_LT(fy_out, inputFx * 1.5) << "fy exceeded 150% of input";
+}
+
+// Regression test for GitHub issue #23961 – verify that undistortPoints itself
+// produces no NaN or Inf on a regular grid of points with the triggering distortion.
+TEST_F(fisheyeTest, undistortPointsNoNaN)
+{
+    const cv::Size sz(200, 200);
+    const cv::Matx33d K5(100.0, 0.0, 100.0,
+                          0.0, 100.0, 100.0,
+                          0.0,   0.0,   1.0);
+    const cv::Vec4d D5(-1.0/3.0, 0.0, 0.0, 0.0);
+
+    // Build a 10×10 grid of pixel coordinates covering the image.
+    const int GRID = 10;
+    cv::Mat srcPts(GRID * GRID, 1, CV_64FC2);
+    cv::Vec2d* p = srcPts.ptr<cv::Vec2d>();
+    for (int row = 0; row < GRID; ++row)
+        for (int col = 0; col < GRID; ++col)
+            p[row * GRID + col] = cv::Vec2d(col * (sz.width  - 1.0) / (GRID - 1),
+                                            row * (sz.height - 1.0) / (GRID - 1));
+
+    cv::Mat dstPts;
+    cv::fisheye::undistortPoints(srcPts, dstPts, K5, D5);
+
+    ASSERT_EQ(dstPts.total(), (size_t)(GRID * GRID));
+    const cv::Vec2d* q = dstPts.ptr<cv::Vec2d>();
+    for (int i = 0; i < GRID * GRID; ++i)
+    {
+        EXPECT_FALSE(std::isnan(q[i][0])) << "NaN in undistortPoints output x at index " << i;
+        EXPECT_FALSE(std::isnan(q[i][1])) << "NaN in undistortPoints output y at index " << i;
+        EXPECT_FALSE(std::isinf(q[i][0])) << "Inf in undistortPoints output x at index " << i;
+        EXPECT_FALSE(std::isinf(q[i][1])) << "Inf in undistortPoints output y at index " << i;
+    }
+}
+
+// Regression test for GitHub issue #23961 – triggering config (k1=-1/3) with an
+// explicit identity rotation matrix supplied as R.
+TEST_F(fisheyeTest, estimateNewCameraMatrixNoNaN_identity_R)
+{
+    const cv::Size sz(200, 200);
+    const cv::Matx33d K6(100.0, 0.0, 100.0,
+                          0.0, 100.0, 100.0,
+                          0.0,   0.0,   1.0);
+    const cv::Vec4d D6(-1.0/3.0, 0.0, 0.0, 0.0);
+
+    cv::Mat R = cv::Mat::eye(3, 3, CV_64F);
+    cv::Mat Knew;
+    cv::fisheye::estimateNewCameraMatrixForUndistortRectify(K6, D6, sz, R, Knew);
+
+    ASSERT_EQ(Knew.rows, 3);
+    ASSERT_EQ(Knew.cols, 3);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            EXPECT_TRUE(std::isfinite(Knew.at<double>(r, c)))
+                << "Knew(" << r << "," << c << ") is not finite: "
+                << Knew.at<double>(r, c);
+}
+
 TEST_F(fisheyeTest, jacobians)
 {
     int n = 10;
