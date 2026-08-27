@@ -323,7 +323,10 @@ void SimpleBlobDetectorImpl::findBlobs(InputArray _image, InputArray _binaryImag
 
         if (params.filterByColor)
         {
-            if (binaryImage.at<uchar> (cvRound(center.location.y), cvRound(center.location.x)) != params.blobColor)
+            // The binaryImage is normalized so that blob pixels are 255 and
+            // background pixels are 0 (see thresholdType selection in detect()).
+            // Therefore we always check for 255 here.
+            if (binaryImage.at<uchar> (cvRound(center.location.y), cvRound(center.location.x)) != 255)
                 continue;
         }
 
@@ -387,12 +390,19 @@ void SimpleBlobDetectorImpl::detect(InputArray image, std::vector<cv::KeyPoint>&
         CV_CheckEQ(params.minRepeatability, 1u, "Incompatible parameters for case with single threshold");
     }
 
+    // Normalize the binary image so that blob pixels are always 255.
+    // For blobColor=0 (dark blobs on bright background) we use THRESH_BINARY_INV so that
+    // dark blobs become white (255) regions, giving a consistent single code path
+    // for moment and contour computation regardless of blobColor.
+    const int thresholdType = (params.filterByColor && params.blobColor == 0)
+                              ? THRESH_BINARY_INV : THRESH_BINARY;
+
     std::vector < std::vector<Center> > centers;
     std::vector<Moments> momentss;
     for (double thresh = params.minThreshold; thresh < params.maxThreshold; thresh += params.thresholdStep)
     {
         Mat binarizedImage;
-        threshold(grayscaleImage, binarizedImage, thresh, 255, THRESH_BINARY);
+        threshold(grayscaleImage, binarizedImage, thresh, 255, thresholdType);
 
         std::vector < Center > curCenters;
         std::vector<std::vector<Point> > curContours;
