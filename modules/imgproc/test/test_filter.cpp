@@ -1506,5 +1506,159 @@ TEST_F(FastFilterEngineTest, FullImage) {
     }
 }
 
+// Regression test for issue #29798:
+// cv::dilate / cv::erode must not assert when the structuring element has
+// type CV_Bool.  CV_Bool stores 0/1 as bytes (same layout as CV_8U), so the
+// result must be identical to using an equivalent CV_8U kernel.
+TEST(Imgproc_Morphology, cvbool_kernel)
+{
+    // Build a 3x3 source image with known values.
+    Mat src(5, 5, CV_8UC1, Scalar(0));
+    src.at<uchar>(2, 2) = 200;
+
+    // Reference kernel: CV_8U rectangular structuring element (all ones).
+    Mat kernel_8u = getStructuringElement(MORPH_RECT, Size(3, 3));
+    ASSERT_EQ(CV_8U, kernel_8u.depth());
+
+    // Convert it to CV_Bool — this is the type that triggered the assert.
+    Mat kernel_bool;
+    kernel_8u.convertTo(kernel_bool, CV_Bool);
+    ASSERT_EQ(CV_Bool, kernel_bool.depth());
+
+    // dilate: CV_Bool kernel must not throw and must match the CV_8U result.
+    Mat dst_ref_dilate, dst_bool_dilate;
+    ASSERT_NO_THROW(cv::dilate(src, dst_ref_dilate, kernel_8u));
+    ASSERT_NO_THROW(cv::dilate(src, dst_bool_dilate, kernel_bool));
+    EXPECT_EQ(0, cv::norm(dst_ref_dilate, dst_bool_dilate, NORM_INF))
+        << "dilate with CV_Bool kernel differs from CV_8U kernel";
+
+    // erode: CV_Bool kernel must not throw and must match the CV_8U result.
+    Mat dst_ref_erode, dst_bool_erode;
+    ASSERT_NO_THROW(cv::erode(src, dst_ref_erode, kernel_8u));
+    ASSERT_NO_THROW(cv::erode(src, dst_bool_erode, kernel_bool));
+    EXPECT_EQ(0, cv::norm(dst_ref_erode, dst_bool_erode, NORM_INF))
+        << "erode with CV_Bool kernel differs from CV_8U kernel";
+
+    // morphologyEx (MORPH_OPEN) exercises both via the same morphOp path.
+    Mat dst_ref_open, dst_bool_open;
+    ASSERT_NO_THROW(cv::morphologyEx(src, dst_ref_open,  MORPH_OPEN, kernel_8u));
+    ASSERT_NO_THROW(cv::morphologyEx(src, dst_bool_open, MORPH_OPEN, kernel_bool));
+    EXPECT_EQ(0, cv::norm(dst_ref_open, dst_bool_open, NORM_INF))
+        << "morphologyEx(MORPH_OPEN) with CV_Bool kernel differs from CV_8U kernel";
+}
+
+// Regression test for issue #29798 — ELLIPSE-shaped CV_Bool kernel.
+TEST(Imgproc_Morphology, cvbool_kernel_ellipse)
+{
+    Mat src(7, 7, CV_8UC1, Scalar(0));
+    src.at<uchar>(3, 3) = 200;
+
+    Mat kernel_8u = getStructuringElement(MORPH_ELLIPSE, Size(5, 5));
+    ASSERT_EQ(CV_8U, kernel_8u.depth());
+
+    Mat kernel_bool;
+    kernel_8u.convertTo(kernel_bool, CV_Bool);
+    ASSERT_EQ(CV_Bool, kernel_bool.depth());
+
+    Mat dst_ref_dilate, dst_bool_dilate;
+    ASSERT_NO_THROW(cv::dilate(src, dst_ref_dilate, kernel_8u));
+    ASSERT_NO_THROW(cv::dilate(src, dst_bool_dilate, kernel_bool));
+    EXPECT_EQ(0, cv::norm(dst_ref_dilate, dst_bool_dilate, NORM_INF))
+        << "dilate (ellipse) with CV_Bool kernel differs from CV_8U kernel";
+
+    Mat dst_ref_erode, dst_bool_erode;
+    ASSERT_NO_THROW(cv::erode(src, dst_ref_erode, kernel_8u));
+    ASSERT_NO_THROW(cv::erode(src, dst_bool_erode, kernel_bool));
+    EXPECT_EQ(0, cv::norm(dst_ref_erode, dst_bool_erode, NORM_INF))
+        << "erode (ellipse) with CV_Bool kernel differs from CV_8U kernel";
+}
+
+// Regression test for issue #29798 — CROSS-shaped CV_Bool kernel.
+TEST(Imgproc_Morphology, cvbool_kernel_cross)
+{
+    Mat src(7, 7, CV_8UC1, Scalar(0));
+    src.at<uchar>(3, 3) = 200;
+
+    Mat kernel_8u = getStructuringElement(MORPH_CROSS, Size(5, 5));
+    ASSERT_EQ(CV_8U, kernel_8u.depth());
+
+    Mat kernel_bool;
+    kernel_8u.convertTo(kernel_bool, CV_Bool);
+    ASSERT_EQ(CV_Bool, kernel_bool.depth());
+
+    Mat dst_ref_dilate, dst_bool_dilate;
+    ASSERT_NO_THROW(cv::dilate(src, dst_ref_dilate, kernel_8u));
+    ASSERT_NO_THROW(cv::dilate(src, dst_bool_dilate, kernel_bool));
+    EXPECT_EQ(0, cv::norm(dst_ref_dilate, dst_bool_dilate, NORM_INF))
+        << "dilate (cross) with CV_Bool kernel differs from CV_8U kernel";
+
+    Mat dst_ref_erode, dst_bool_erode;
+    ASSERT_NO_THROW(cv::erode(src, dst_ref_erode, kernel_8u));
+    ASSERT_NO_THROW(cv::erode(src, dst_bool_erode, kernel_bool));
+    EXPECT_EQ(0, cv::norm(dst_ref_erode, dst_bool_erode, NORM_INF))
+        << "erode (cross) with CV_Bool kernel differs from CV_8U kernel";
+}
+
+// Regression test for issue #29798 — MORPH_GRADIENT with CV_Bool kernel on CV_8UC3 source.
+TEST(Imgproc_Morphology, cvbool_kernel_gradient)
+{
+    Mat src(9, 9, CV_8UC3, Scalar(0, 0, 0));
+    src.at<Vec3b>(4, 4) = Vec3b(200, 100, 50);
+
+    Mat kernel_8u = getStructuringElement(MORPH_RECT, Size(3, 3));
+    Mat kernel_bool;
+    kernel_8u.convertTo(kernel_bool, CV_Bool);
+    ASSERT_EQ(CV_Bool, kernel_bool.depth());
+
+    Mat dst;
+    ASSERT_NO_THROW(cv::morphologyEx(src, dst, MORPH_GRADIENT, kernel_bool));
+    EXPECT_FALSE(dst.empty());
+}
+
+// Regression test for issue #29798 — all morphology operations with CV_Bool kernel.
+TEST(Imgproc_Morphology, cvbool_kernel_all_morphops)
+{
+    Mat src(7, 7, CV_8UC1, Scalar(0));
+    src.at<uchar>(3, 3) = 200;
+
+    Mat kernel_8u = getStructuringElement(MORPH_RECT, Size(3, 3));
+    Mat kernel_bool;
+    kernel_8u.convertTo(kernel_bool, CV_Bool);
+    ASSERT_EQ(CV_Bool, kernel_bool.depth());
+
+    const int ops[] = {
+        MORPH_ERODE, MORPH_DILATE, MORPH_OPEN, MORPH_CLOSE,
+        MORPH_GRADIENT, MORPH_TOPHAT, MORPH_BLACKHAT, MORPH_HITMISS
+    };
+    const char* names[] = {
+        "MORPH_ERODE", "MORPH_DILATE", "MORPH_OPEN", "MORPH_CLOSE",
+        "MORPH_GRADIENT", "MORPH_TOPHAT", "MORPH_BLACKHAT", "MORPH_HITMISS"
+    };
+
+    for (int i = 0; i < (int)(sizeof(ops) / sizeof(ops[0])); ++i)
+    {
+        Mat dst;
+        EXPECT_NO_THROW(cv::morphologyEx(src, dst, ops[i], kernel_bool))
+            << names[i] << " threw with CV_Bool kernel";
+    }
+}
+
+// Regression test for issue #29798 — CV_32F source image with CV_Bool kernel.
+TEST(Imgproc_Morphology, cvbool_kernel_float_src)
+{
+    Mat src(7, 7, CV_32FC1, Scalar(0.f));
+    src.at<float>(3, 3) = 1.0f;
+
+    Mat kernel_8u = getStructuringElement(MORPH_RECT, Size(3, 3));
+    Mat kernel_bool;
+    kernel_8u.convertTo(kernel_bool, CV_Bool);
+    ASSERT_EQ(CV_Bool, kernel_bool.depth());
+
+    Mat dst_ref, dst_bool;
+    ASSERT_NO_THROW(cv::dilate(src, dst_ref,  kernel_8u));
+    ASSERT_NO_THROW(cv::dilate(src, dst_bool, kernel_bool));
+    EXPECT_EQ(0, cv::norm(dst_ref, dst_bool, NORM_INF))
+        << "dilate (CV_32F src) with CV_Bool kernel differs from CV_8U kernel";
+}
 
 }} // namespace

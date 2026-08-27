@@ -986,6 +986,16 @@ static void morphOp( int op, InputArray _src, OutputArray _dst,
     CV_Assert(!_src.empty());
 
     Mat kernel = _kernel.getMat();
+    // CV_Bool structuring elements are stored as 0/1 bytes, identical in
+    // layout to CV_8U.  Convert early so all downstream code (including the
+    // CV_Assert(_kernel.type() == CV_8U) in MorphFilter) sees CV_8U.
+    // Fixes issue #29798: cv::dilate/erode asserts on CV_Bool mask.
+    if (!kernel.empty() && kernel.depth() == CV_Bool)
+    {
+        Mat tmp;
+        kernel.convertTo(tmp, CV_8U);
+        kernel = tmp;
+    }
     Size ksize = !kernel.empty() ? kernel.size() : Size(3,3);
     anchor = normalizeAnchor(anchor, ksize);
 
