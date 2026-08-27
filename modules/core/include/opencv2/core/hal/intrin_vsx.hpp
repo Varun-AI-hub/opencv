@@ -572,14 +572,18 @@ inline v_int16x8 v_mul_hi(const v_int16x8& a, const v_int16x8& b)
     vec_int4 p0 = vec_mule(a.val, b.val);
     vec_int4 p1 = vec_mulo(a.val, b.val);
     static const vec_uchar16 perm = {2, 3, 18, 19, 6, 7, 22, 23, 10, 11, 26, 27, 14, 15, 30, 31};
-    return v_int16x8(vec_perm(vec_short8_c(p0), vec_short8_c(p1), perm));
+    // Use vsx_reinterpret_as to avoid deprecated implicit conversion between
+    // vector types with different element sizes (vec_int4 vs vec_short8).
+    return v_int16x8(vsx_reinterpret_as<vec_short8>(vec_perm(p0, p1, perm)));
 }
 inline v_uint16x8 v_mul_hi(const v_uint16x8& a, const v_uint16x8& b)
 {
     vec_uint4 p0 = vec_mule(a.val, b.val);
     vec_uint4 p1 = vec_mulo(a.val, b.val);
     static const vec_uchar16 perm = {2, 3, 18, 19, 6, 7, 22, 23, 10, 11, 26, 27, 14, 15, 30, 31};
-    return v_uint16x8(vec_perm(vec_ushort8_c(p0), vec_ushort8_c(p1), perm));
+    // Use vsx_reinterpret_as to avoid deprecated implicit conversion between
+    // vector types with different element sizes (vec_uint4 vs vec_ushort8).
+    return v_uint16x8(vsx_reinterpret_as<vec_ushort8>(vec_perm(p0, p1, perm)));
 }
 
 /** Non-saturating arithmetics **/
@@ -1384,7 +1388,10 @@ inline v_float32x4 v_load_expand(const hfloat* ptr)
     const vec_int4 maxexp = vec_int4_sp(0x7c000000);
     const vec_float4 deltaf = vec_float4_c(vec_int4_sp(0x38800000));
 
-    vec_int4 bits = vec_int4_c(vec_mergeh(vec_short8_c(z), vec_short8_c(vf16)));
+    // Use vsx_reinterpret_as to avoid deprecated implicit conversion between
+    // vector types with different element sizes (vec_short8/vec_int4 boundary).
+    // z is vec_int4_z (all zeros), so using vec_short8_z avoids an extra cast.
+    vec_int4 bits = vsx_reinterpret_as<vec_int4>(vec_mergeh(vec_short8_z, vec_short8_c(vf16)));
     vec_int4 e = vec_and(bits, maxexp), sign = vec_and(bits, signmask);
     vec_int4 t = vec_add(vec_sr(vec_xor(bits, sign), vec_uint4_sp(3)), delta); // ((h & 0x7fff) << 13) + delta
     vec_int4 zt = vec_int4_c(vec_sub(vec_float4_c(vec_add(t, vec_int4_sp(1 << 23))), deltaf));

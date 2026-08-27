@@ -98,6 +98,22 @@ typedef  __vector double vec_double2;
 
 #define VSX_FINLINE(tp) extern inline tp __attribute__((always_inline))
 
+#ifdef __cplusplus
+// Helper for bitwise vector type reinterpretation.
+// Use this instead of C-style casts like ((vec_ushort8)(vec_uint4_val)), which
+// trigger "implicit conversion between vector types is deprecated" warnings
+// (GCC 10+ -Wdeprecated-lax-vec-conv-all) when element sizes differ.
+// Both types must have the same total size (128 bits for VSX vectors).
+template<typename To, typename From>
+static inline __attribute__((always_inline)) To vsx_reinterpret_as(const From& v)
+{
+    static_assert(sizeof(To) == sizeof(From), "vsx_reinterpret_as: type size mismatch");
+    To r;
+    __builtin_memcpy(&r, &v, sizeof(r));
+    return r;
+}
+#endif // __cplusplus
+
 #define VSX_REDIRECT_1RG(rt, rg, fnm, fn2)   \
 VSX_FINLINE(rt) fnm(const rg& a) { return fn2(a); }
 
