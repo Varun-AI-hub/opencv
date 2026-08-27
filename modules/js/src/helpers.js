@@ -65,11 +65,117 @@ Module['imread'] = function(imageSource) {
         canvas = img;
         ctx = canvas.getContext('2d');
     } else {
-        throw new Error('Please input the valid canvas or img id.');
+        // Provide a helpful error for common incorrect usages (File, Blob, ArrayBuffer).
+        // These types require async decoding — use cv.imreadFromBuffer() instead.
+        if (typeof File !== 'undefined' && img instanceof File) {
+            throw new Error(
+                'cv.imread() does not accept File objects. ' +
+                'Use cv.imreadFromBuffer(file) which returns a Promise<cv.Mat>.'
+            );
+        }
+        if (typeof Blob !== 'undefined' && img instanceof Blob) {
+            throw new Error(
+                'cv.imread() does not accept Blob objects. ' +
+                'Use cv.imreadFromBuffer(blob) which returns a Promise<cv.Mat>.'
+            );
+        }
+        if (img instanceof ArrayBuffer || ArrayBuffer.isView(img)) {
+            throw new Error(
+                'cv.imread() does not accept ArrayBuffer or TypedArray. ' +
+                'Use cv.imreadFromBuffer(buffer) which returns a Promise<cv.Mat>.'
+            );
+        }
+        throw new Error('Please input the valid canvas or img element or id.');
     }
 
     var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     return cv.matFromImageData(imgData);
+};
+
+/**
+ * Decode an image from a File, Blob, ArrayBuffer, or Uint8Array and return a
+ * Promise that resolves to a cv.Mat with type CV_8UC4 (RGBA channel order).
+ *
+ * The returned Mat has the same channel layout as images loaded via cv.imread()
+ * from an HTMLImageElement, so colour-conversion code such as
+ *   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY)
+ * works identically regardless of whether the source was a DOM element or a
+ * raw file buffer.  This is the correct way to load images from File inputs or
+ * fetch() responses in OpenCV.js.
+ *
+ * @param {File|Blob|ArrayBuffer|Uint8Array} bufferOrBlob
+ * @param {string} [mimeType] - MIME type hint (e.g. 'image/png').  Only needed
+ *        when passing an ArrayBuffer/Uint8Array whose type cannot be inferred.
+ * @returns {Promise<cv.Mat>}
+ *
+ * @example
+ * // HTML file input
+ * fileInput.addEventListener('change', function() {
+ *     cv.imreadFromBuffer(fileInput.files[0]).then(function(src) {
+ *         var gray = new cv.Mat();
+ *         cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+ *         var edges = new cv.Mat();
+ *         cv.Canny(gray, edges, 50, 150);
+ *         cv.imshow('canvas', edges);
+ *         src.delete(); gray.delete(); edges.delete();
+ *     });
+ * });
+ *
+ * @example
+ * // fetch() response
+ * fetch('image.png')
+ *     .then(function(r) { return r.arrayBuffer(); })
+ *     .then(function(buf) { return cv.imreadFromBuffer(buf); })
+ *     .then(function(src) { ... });
+ */
+Module['imreadFromBuffer'] = function(bufferOrBlob, mimeType) {
+    return new Promise(function(resolve, reject) {
+        var blob;
+        if (typeof Blob !== 'undefined' && bufferOrBlob instanceof Blob) {
+            // Covers both File (which extends Blob) and plain Blob.
+            blob = bufferOrBlob;
+        } else if (bufferOrBlob instanceof ArrayBuffer) {
+            blob = new Blob([bufferOrBlob], { type: mimeType || '' });
+        } else if (ArrayBuffer.isView(bufferOrBlob)) {
+            // Uint8Array, Int8Array, etc.
+            blob = new Blob([bufferOrBlob], { type: mimeType || '' });
+        } else {
+            reject(new Error(
+                'cv.imreadFromBuffer(): input must be a File, Blob, ArrayBuffer, or TypedArray.'
+            ));
+            return;
+        }
+
+        var url = URL.createObjectURL(blob);
+        var img = new Image();
+
+        img.onload = function() {
+            URL.revokeObjectURL(url);
+            try {
+                var canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                var ctx = canvas.getContext('2d', { willReadFrequently: true });
+                ctx.drawImage(img, 0, 0);
+                var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                // matFromImageData always produces CV_8UC4 (RGBA), matching
+                // the output of cv.imread() on an HTMLImageElement.
+                resolve(cv.matFromImageData(imageData));
+            } catch (err) {
+                reject(new Error('cv.imreadFromBuffer(): failed to create Mat: ' + err.message));
+            }
+        };
+
+        img.onerror = function() {
+            URL.revokeObjectURL(url);
+            reject(new Error(
+                'cv.imreadFromBuffer(): failed to decode image. ' +
+                'Make sure the buffer contains a valid image file (PNG, JPEG, etc.).'
+            ));
+        };
+
+        img.src = url;
+    });
 };
 
 Module['imshow'] = function(canvasSource, mat) {

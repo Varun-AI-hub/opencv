@@ -779,3 +779,203 @@ QUnit.test('IntelligentScissorsMB', function(assert) {
   assert.equal(contour.type(), cv.CV_32SC2);
   assert.ok(contour.total() == 71, contour.total());
 });
+
+// Regression test for issue #27826:
+// Edge detection must produce the same result whether the source image was
+// loaded via cv.imread(imgElement) or via cv.imreadFromBuffer(buffer).
+// The root cause was that loading from a buffer had no supported path, so
+// users constructed Mats with the wrong channel order (BGR instead of RGBA),
+// causing cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY) to silently produce
+// incorrect grayscale data and Canny to output a blank/wrong edge map.
+QUnit.test('imreadFromBuffer - channel parity with imread for edge detection (issue #27826)', function(assert) {
+    var done = assert.async();
+
+    // Build a synthetic 10x10 image: white background, black 6x6 square.
+    // When decoded via Canny the inner border of the square must be non-zero.
+    var refCanvas = document.createElement('canvas');
+    refCanvas.width = 10;
+    refCanvas.height = 10;
+    var refCtx = refCanvas.getContext('2d');
+    refCtx.fillStyle = 'white';
+    refCtx.fillRect(0, 0, 10, 10);
+    refCtx.fillStyle = 'black';
+    refCtx.fillRect(2, 2, 6, 6);
+
+    // Reference path: load directly from canvas (same as imread from HTMLCanvasElement).
+    var refMat = cv.imread(refCanvas);
+
+    // Helper: run Canny on an RGBA Mat and return pixel count of detected edges.
+    function cannyEdgeCount(rgbaMat) {
+        var gray = new cv.Mat();
+        // COLOR_RGBA2GRAY is the correct conversion for imread() / imreadFromBuffer() output.
+        cv.cvtColor(rgbaMat, gray, cv.COLOR_RGBA2GRAY);
+        var edges = new cv.Mat();
+        cv.Canny(gray, edges, 50, 150);
+        var count = cv.countNonZero(edges);
+        gray.delete();
+        edges.delete();
+        return count;
+    }
+
+    var refEdgeCount = cannyEdgeCount(refMat);
+    assert.ok(refEdgeCount > 0, 'Canny detects edges on imread(canvas) reference image');
+
+    // Encode the reference canvas to a Blob (PNG) and decode via imreadFromBuffer.
+    refCanvas.toBlob(function(blob) {
+        cv.imreadFromBuffer(blob).then(function(bufMat) {
+            // 1. Output type must be CV_8UC4 (RGBA), same as imread().
+            assert.equal(bufMat.type(), cv.CV_8UC4,
+                'imreadFromBuffer returns CV_8UC4 (RGBA) Mat — consistent with imread()');
+            assert.equal(bufMat.rows, 10, 'correct row count');
+            assert.equal(bufMat.cols, 10, 'correct column count');
+
+            // 2. Canny edge count must match the reference (validates correct channel format).
+            var bufEdgeCount = cannyEdgeCount(bufMat);
+            assert.ok(bufEdgeCount > 0,
+                'Canny detects edges on imreadFromBuffer result (non-blank output)');
+            assert.equal(bufEdgeCount, refEdgeCount,
+                'Canny edge count from buffer-loaded image matches imread() reference');
+
+            refMat.delete();
+            bufMat.delete();
+            done();
+        }).catch(function(err) {
+            assert.ok(false, 'imreadFromBuffer rejected: ' + err.message);
+            refMat.delete();
+            done();
+        });
+    }, 'image/png');
+});
+
+QUnit.test('imreadFromBuffer - ArrayBuffer input', function(assert) {
+    var done = assert.async();
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 4;
+    canvas.height = 4;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'red';
+    ctx.fillRect(0, 0, 4, 4);
+
+    canvas.toBlob(function(blob) {
+        // Convert Blob -> ArrayBuffer, then pass to imreadFromBuffer.
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            cv.imreadFromBuffer(e.target.result).then(function(mat) {
+                assert.equal(mat.type(), cv.CV_8UC4,
+                    'imreadFromBuffer(ArrayBuffer) returns CV_8UC4 Mat');
+                assert.equal(mat.rows, 4);
+                assert.equal(mat.cols, 4);
+                // Top-left pixel should be red (R=255, G=0, B=0, A=255) in RGBA order.
+                assert.equal(mat.data[0], 255, 'R channel correct');
+                assert.equal(mat.data[1], 0,   'G channel correct');
+                assert.equal(mat.data[2], 0,   'B channel correct');
+                assert.equal(mat.data[3], 255, 'A channel correct');
+                mat.delete();
+                done();
+            }).catch(function(err) {
+                assert.ok(false, 'imreadFromBuffer(ArrayBuffer) rejected: ' + err.message);
+                done();
+            });
+        };
+        reader.readAsArrayBuffer(blob);
+    }, 'image/png');
+});
+
+QUnit.test('imreadFromBuffer - rejects invalid input', function(assert) {
+    var done = assert.async();
+    cv.imreadFromBuffer({}).then(function() {
+        assert.ok(false, 'should have rejected');
+        done();
+    }).catch(function(err) {
+        assert.ok(err instanceof Error, 'rejected with an Error');
+        assert.ok(
+            /File|Blob|ArrayBuffer|TypedArray|Uint8Array/i.test(err.message),
+            'error message mentions expected types, got: ' + err.message
+        );
+        done();
+    });
+});
+
+QUnit.test('imreadFromBuffer - Uint8Array input', function(assert) {
+    var done = assert.async();
+    // Minimal valid 1x1 red pixel PNG (hardcoded bytes).
+    var b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==';
+    var binary = atob(b64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+    cv.imreadFromBuffer(bytes).then(function(mat) {
+        assert.equal(mat.rows, 1, 'rows === 1');
+        assert.equal(mat.cols, 1, 'cols === 1');
+        assert.equal(mat.type(), cv.CV_8UC4, 'type is CV_8UC4');
+        mat.delete();
+        done();
+    }).catch(function(err) {
+        assert.ok(false, 'imreadFromBuffer(Uint8Array) rejected: ' + err.message);
+        done();
+    });
+});
+
+QUnit.test('imreadFromBuffer - mat dimensions match canvas', function(assert) {
+    var done = assert.async();
+    var canvas = document.createElement('canvas');
+    canvas.width = 20;
+    canvas.height = 30;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'blue';
+    ctx.fillRect(0, 0, 20, 30);
+    canvas.toBlob(function(blob) {
+        cv.imreadFromBuffer(blob).then(function(mat) {
+            assert.equal(mat.rows, 30, 'rows equals canvas height (30)');
+            assert.equal(mat.cols, 20, 'cols equals canvas width (20)');
+            mat.delete();
+            done();
+        }).catch(function(err) {
+            assert.ok(false, 'imreadFromBuffer rejected: ' + err.message);
+            done();
+        });
+    }, 'image/png');
+});
+
+QUnit.test('imread - File error message', function(assert) {
+    var file = new File([], 'test.png');
+    var threw = false;
+    var msg = '';
+    try {
+        cv.imread(file);
+    } catch(e) {
+        threw = true;
+        msg = e.message || '';
+    }
+    assert.ok(threw, 'cv.imread(File) throws an error');
+    assert.ok(
+        /imreadFromBuffer/i.test(msg),
+        'error message mentions imreadFromBuffer, got: ' + msg
+    );
+});
+
+QUnit.test('imreadFromBuffer - multiple sequential calls', function(assert) {
+    var done = assert.async();
+    var canvas = document.createElement('canvas');
+    canvas.width = 8;
+    canvas.height = 8;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'green';
+    ctx.fillRect(0, 0, 8, 8);
+    canvas.toBlob(function(blob) {
+        var p1 = cv.imreadFromBuffer(blob);
+        var p2 = cv.imreadFromBuffer(blob);
+        Promise.all([p1, p2]).then(function(mats) {
+            var mat1 = mats[0], mat2 = mats[1];
+            assert.equal(mat1.rows, mat2.rows, 'both calls return same rows');
+            assert.equal(mat1.cols, mat2.cols, 'both calls return same cols');
+            assert.equal(mat1.type(), mat2.type(), 'both calls return same type');
+            mat1.delete();
+            mat2.delete();
+            done();
+        }).catch(function(err) {
+            assert.ok(false, 'sequential imreadFromBuffer calls failed: ' + err.message);
+            done();
+        });
+    }, 'image/png');
+});
