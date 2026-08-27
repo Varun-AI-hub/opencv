@@ -806,7 +806,11 @@ public:
 
 #endif // HAVE_OPENCV_DNN || CV_DOXYGEN
 
-/** @brief Class for extracting blobs from an image. :
+/** @brief Class for extracting blobs from an image.
+
+A "blob" is a group of connected pixels that share similar properties (color, area, shape).
+SimpleBlobDetector detects keypoints at blob centers and encodes their approximate radius in
+the keypoint size field.
 
 The class implements a simple algorithm for extracting blobs from an image:
 
@@ -836,33 +840,169 @@ between minInertiaRatio (inclusive) and maxInertiaRatio (exclusive).
 minConvexity (inclusive) and maxConvexity (exclusive).
 
 Default values of parameters are tuned to extract dark circular blobs.
+
+**Example usage (C++):**
+@code{.cpp}
+    // Detect dark blobs larger than 50 px² on a grayscale image
+    cv::SimpleBlobDetector::Params params;
+    params.filterByColor = true;
+    params.blobColor     = 0;       // 0 = dark blobs, 255 = light blobs
+    params.filterByArea  = true;
+    params.minArea       = 50.0f;
+    params.maxArea       = 10000.0f;
+    params.filterByCircularity = false;
+    params.filterByInertia     = false;
+    params.filterByConvexity   = false;
+
+    cv::Ptr<cv::SimpleBlobDetector> detector =
+        cv::SimpleBlobDetector::create(params);
+
+    std::vector<cv::KeyPoint> keypoints;
+    detector->detect(grayImage, keypoints);
+
+    // Draw detected blobs as red circles (size encodes blob radius)
+    cv::Mat result;
+    cv::drawKeypoints(grayImage, keypoints, result,
+                      cv::Scalar(0, 0, 255),
+                      cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+@endcode
+
+**Example usage (Python):**
+@code{.py}
+    params = cv2.SimpleBlobDetector_Params()
+    params.filterByColor = True
+    params.blobColor     = 0       # 0 = dark, 255 = light
+    params.filterByArea  = True
+    params.minArea       = 50
+    params.maxArea       = 10000
+
+    detector = cv2.SimpleBlobDetector_create(params)
+    keypoints = detector.detect(gray_image)
+
+    result = cv2.drawKeypoints(
+        gray_image, keypoints, None,
+        (0, 0, 255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+@endcode
  */
 class CV_EXPORTS_W SimpleBlobDetector : public Feature2D
 {
 public:
+  /** @brief Parameters that control the blob detection algorithm.
+
+  Create a default-constructed Params object and modify only the fields relevant to your
+  use-case, then pass it to SimpleBlobDetector::create(). All filter stages are independent:
+  enable or disable each one with the corresponding filterBy\* flag. Bounds are applied as
+  [min, max) — that is, the minimum value is inclusive and the maximum value is exclusive.
+  */
   struct CV_EXPORTS_W_SIMPLE Params
   {
       CV_WRAP Params();
+
+      /** @brief Step between consecutive thresholds used to binarize the source image.
+      The image is thresholded at minThreshold, minThreshold+thresholdStep,
+      minThreshold+2*thresholdStep, … up to (but not including) maxThreshold.
+      Smaller values produce more accurate centers at the cost of speed.
+      @note Default value: 10. Valid range: > 0. */
       CV_PROP_RW float thresholdStep;
+
+      /** @brief Minimum threshold value used to binarize the source image (inclusive).
+      Pixel intensities below this value are considered background in the first binary image.
+      @note Default value: 50. Valid range: [0, 255]. */
       CV_PROP_RW float minThreshold;
+
+      /** @brief Maximum threshold value used to binarize the source image (exclusive).
+      Thresholding stops before reaching this value.
+      @note Default value: 220. Valid range: (minThreshold, 255]. */
       CV_PROP_RW float maxThreshold;
+
+      /** @brief Minimum number of binary images in which a blob must appear to be retained.
+      A higher value reduces false positives caused by noise but may miss faint blobs.
+      This parameter is only meaningful when the thresholding range covers more than one step
+      (i.e., maxThreshold - minThreshold > thresholdStep).
+      @note Default value: 2. Valid range: >= 1. */
       CV_PROP_RW size_t minRepeatability;
+
+      /** @brief Minimum distance in pixels between the centers of two distinct blobs.
+      If two blob candidates are closer than this value they are merged into one.
+      @note Default value: 10. Valid range: >= 0. */
       CV_PROP_RW float minDistBetweenBlobs;
 
+      /** @brief Enable filtering by blob color (intensity at center).
+      When true, only blobs whose binary-image center intensity equals blobColor are kept.
+      @note Default value: true. */
       CV_PROP_RW bool filterByColor;
+
+      /** @brief Target blob intensity at the blob center in the binarized image.
+      Use 0 to detect dark blobs on a light background; use 255 for light blobs on a dark
+      background. Only used when filterByColor is true.
+      @note Default value: 0. Valid values: 0 or 255. */
       CV_PROP_RW uchar blobColor;
 
+      /** @brief Enable filtering by blob area (in pixels²).
+      When true, only blobs with area in [minArea, maxArea) are kept.
+      @note Default value: true. */
       CV_PROP_RW bool filterByArea;
-      CV_PROP_RW float minArea, maxArea;
 
+      /** @brief Minimum blob area in pixels² (inclusive).
+      Blobs smaller than this are discarded. Only used when filterByArea is true.
+      @note Default value: 25. Valid range: >= 0. */
+      CV_PROP_RW float minArea;
+
+      /** @brief Maximum blob area in pixels² (exclusive).
+      Blobs larger than or equal to this are discarded. Only used when filterByArea is true.
+      @note Default value: 5000. Valid range: > minArea. */
+      CV_PROP_RW float maxArea;
+
+      /** @brief Enable filtering by blob circularity.
+      Circularity is defined as \f$\frac{4 \pi \cdot \text{Area}}{\text{perimeter}^2}\f$.
+      A perfect circle has circularity 1; a thin elongated shape approaches 0.
+      When true, only blobs with circularity in [minCircularity, maxCircularity) are kept.
+      @note Default value: false. */
       CV_PROP_RW bool filterByCircularity;
-      CV_PROP_RW float minCircularity, maxCircularity;
 
+      /** @brief Minimum circularity of a blob (inclusive).
+      Only used when filterByCircularity is true.
+      @note Default value: 0.8. Valid range: [0, 1]. */
+      CV_PROP_RW float minCircularity;
+
+      /** @brief Maximum circularity of a blob (exclusive).
+      Only used when filterByCircularity is true.
+      @note Default value: FLT_MAX (no upper limit). Valid range: (minCircularity, 1]. */
+      CV_PROP_RW float maxCircularity;
+
+      /** @brief Enable filtering by the ratio of minimum to maximum inertia.
+      The inertia ratio measures how elongated a blob is: 1 for a circle, near 0 for a line.
+      When true, only blobs with inertia ratio in [minInertiaRatio, maxInertiaRatio) are kept.
+      @note Default value: true. */
       CV_PROP_RW bool filterByInertia;
-      CV_PROP_RW float minInertiaRatio, maxInertiaRatio;
 
+      /** @brief Minimum inertia ratio of a blob (inclusive).
+      0 accepts any elongated shape; 1 accepts only circles.
+      Only used when filterByInertia is true.
+      @note Default value: 0.1. Valid range: [0, 1]. */
+      CV_PROP_RW float minInertiaRatio;
+
+      /** @brief Maximum inertia ratio of a blob (exclusive).
+      Only used when filterByInertia is true.
+      @note Default value: FLT_MAX (no upper limit). Valid range: (minInertiaRatio, 1]. */
+      CV_PROP_RW float maxInertiaRatio;
+
+      /** @brief Enable filtering by blob convexity.
+      Convexity is defined as the ratio of the blob area to the area of its convex hull.
+      A convex shape has convexity 1; a shape with large indentations approaches 0.
+      When true, only blobs with convexity in [minConvexity, maxConvexity) are kept.
+      @note Default value: true. */
       CV_PROP_RW bool filterByConvexity;
-      CV_PROP_RW float minConvexity, maxConvexity;
+
+      /** @brief Minimum convexity of a blob (inclusive).
+      Only used when filterByConvexity is true.
+      @note Default value: 0.95. Valid range: [0, 1]. */
+      CV_PROP_RW float minConvexity;
+
+      /** @brief Maximum convexity of a blob (exclusive).
+      Only used when filterByConvexity is true.
+      @note Default value: FLT_MAX (no upper limit). Valid range: (minConvexity, 1]. */
+      CV_PROP_RW float maxConvexity;
 
       /** @brief Flag to enable contour collection.
       If set to true, the detector will store the contours of the detected blobs in memory,
@@ -875,10 +1015,19 @@ public:
       void write( FileStorage& fs ) const;
   };
 
+  /** @brief Creates a SimpleBlobDetector with the given parameters.
+  @param parameters Detection parameters (see Params). If omitted, default parameters are used,
+  which are tuned for detecting dark, roughly circular blobs.
+  */
   CV_WRAP static Ptr<SimpleBlobDetector>
     create(const SimpleBlobDetector::Params &parameters = SimpleBlobDetector::Params());
 
+  /** @brief Replaces the current detection parameters.
+  @param params New parameters to use for subsequent detect() calls.
+  */
   CV_WRAP virtual void setParams(const SimpleBlobDetector::Params& params ) = 0;
+
+  /** @brief Returns the current detection parameters. */
   CV_WRAP virtual SimpleBlobDetector::Params getParams() const = 0;
 
   CV_WRAP virtual String getDefaultName() const CV_OVERRIDE;

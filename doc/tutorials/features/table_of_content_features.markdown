@@ -12,4 +12,5 @@ Features framework (features module) {#tutorial_table_of_content_features}
 -   @subpage tutorial_detection_of_planar_objects
 -   @subpage tutorial_akaze_matching
 -   @subpage tutorial_akaze_tracking
+-   @subpage tutorial_blob_detection
 -   @subpage tutorial_homography
