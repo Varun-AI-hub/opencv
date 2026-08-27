@@ -2198,8 +2198,25 @@ Mat getMatFromTensor(const opencv_onnx::TensorProto& tensor_proto, bool uint8ToI
     }
     else if (datatype == opencv_onnx::TensorProto_DataType_BOOL)
     {
-        checkPayloadSize(raw_data_size);
-        Mat(sizes, CV_Bool, rawdata).copyTo(blob);
+        // ONNX BOOL tensors may use raw_data (1 byte per element) or int32_data (1 int per element).
+        // Map to CV_8U (0 or 1) which is the standard OpenCV boolean representation.
+        // See issue #19366.
+        blob.create((int)sizes.size(), sizes.data(), CV_8U);
+        uint8_t* dst = blob.ptr<uint8_t>();
+        if (!tensor_proto.int32_data().empty())
+        {
+            checkPayloadSize(tensor_proto.int32_data().size());
+            const int32_t* src = tensor_proto.int32_data().data();
+            for (size_t i = 0; i < total_elems; ++i)
+                dst[i] = src[i] ? 1 : 0;
+        }
+        else
+        {
+            checkPayloadSize(raw_data_size);
+            const uint8_t* src = reinterpret_cast<const uint8_t*>(rawdata);
+            for (size_t i = 0; i < total_elems; ++i)
+                dst[i] = src[i] ? 1 : 0;
+        }
     }
     else if (datatype == opencv_onnx::TensorProto_DataType_INT16)
     {
