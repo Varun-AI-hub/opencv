@@ -38,6 +38,9 @@ Introduction to OpenCV {#tutorial_table_of_content_introduction}
 -   @subpage tutorial_building_fastcv
 -   @ref tutorial_ios_install
 
+##### NVIDIA GPU acceleration
+-   @subpage tutorial_nvcuvid_build - How to build OpenCV with NVIDIA nvcuvid hardware video decode support
+
 ##### Usage basics
 -   @subpage tutorial_display_image - We will learn how to load an image from file and display it using OpenCV
 
