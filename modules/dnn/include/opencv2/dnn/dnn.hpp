@@ -820,6 +820,26 @@ CV__DNN_INLINE_NS_BEGIN
          */
         CV_WRAP ModelFormat getModelFormat() const;
 
+        /** @brief Returns a list of all keys present in the ONNX model's metadata_props.
+         *
+         * ONNX models can store arbitrary key-value metadata in their `metadata_props`
+         * field.  This method returns the set of keys that were present in the loaded
+         * model.  Returns an empty vector when the model has no metadata or was loaded
+         * from a non-ONNX source.
+         *
+         * @see getMetaData
+         */
+        CV_WRAP std::vector<String> getMetaDataKeys() const;
+
+        /** @brief Returns the value associated with a key from the ONNX model's metadata_props.
+         *
+         * @param key        The metadata key to look up.
+         * @param defaultVal Value returned when the key is not present (default: empty string).
+         *
+         * @see getMetaDataKeys
+         */
+        CV_WRAP String getMetaData(const String& key, const String& defaultVal = String()) const;
+
         /** @brief Sets the new input value for the network
          *  @param blob        A new blob. Should have CV_32F or CV_8U depth.
          *  @param name        A name of input layer.

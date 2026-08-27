@@ -3750,4 +3750,55 @@ TEST_P(Test_ONNX_layers, getUnconnectedOutLayers)
     ASSERT_TRUE(layer);
 }
 
+// Issue #23277: verify that ONNX metadata_props are exposed through Net::getMetaData /
+// Net::getMetaDataKeys after loading a model that carries such entries.
+//
+// A minimal ONNX ModelProto is crafted by hand as a raw protobuf byte sequence so
+// that the test has no dependency on the protobuf library or any external file.
+//
+// Wire-format layout (all lengths already embedded):
+//   field 1 (ir_version=7):           08 07
+//   field 7 (graph {name:"test"}):    3A 06 12 04 74 65 73 74
+//   field 8 (opset_import {ver=15}):  42 02 10 0F
+//   field 14 (metadata_props[0]):     key="author"  value="OpenCV"
+//   field 14 (metadata_props[1]):     key="classes" value="cat,dog"
+TEST(Test_ONNX_importer, MetaDataProps)
+{
+    // Minimal ONNX ModelProto binary (hand-encoded protobuf).
+    static const uchar onnxBytes[] = {
+        // ir_version = 7  (field 1, varint)
+        0x08, 0x07,
+        // graph = GraphProto { name: "test" }  (field 7, LEN)
+        0x3A, 0x06,
+            0x12, 0x04, 0x74, 0x65, 0x73, 0x74,   // name: "test"
+        // opset_import = { version: 15 }  (field 8, LEN)
+        0x42, 0x02,
+            0x10, 0x0F,
+        // metadata_props[0]: key="author" value="OpenCV"  (field 14, LEN)
+        0x72, 0x10,
+            0x0A, 0x06, 0x61, 0x75, 0x74, 0x68, 0x6F, 0x72,   // key: "author"
+            0x12, 0x06, 0x4F, 0x70, 0x65, 0x6E, 0x43, 0x56,   // value: "OpenCV"
+        // metadata_props[1]: key="classes" value="cat,dog"  (field 14, LEN)
+        0x72, 0x12,
+            0x0A, 0x07, 0x63, 0x6C, 0x61, 0x73, 0x73, 0x65, 0x73,  // key: "classes"
+            0x12, 0x07, 0x63, 0x61, 0x74, 0x2C, 0x64, 0x6F, 0x67   // value: "cat,dog"
+    };
+
+    std::vector<uchar> buf(onnxBytes, onnxBytes + sizeof(onnxBytes));
+    Net net = readNetFromONNX(buf);
+    ASSERT_FALSE(net.empty());
+
+    std::vector<String> keys = net.getMetaDataKeys();
+    ASSERT_EQ(2u, keys.size());
+
+    // The map is ordered alphabetically; check both entries regardless of order.
+    EXPECT_EQ(String("OpenCV"),  net.getMetaData("author"));
+    EXPECT_EQ(String("cat,dog"), net.getMetaData("classes"));
+
+    // Missing key must return the supplied default.
+    EXPECT_EQ(String("N/A"), net.getMetaData("nonexistent", "N/A"));
+    // Missing key without default must return empty string.
+    EXPECT_EQ(String(""),    net.getMetaData("nonexistent"));
+}
+
 }} // namespace

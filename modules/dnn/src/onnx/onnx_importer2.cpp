@@ -722,6 +722,14 @@ Net ONNXImporter2::parseModel()
     netimpl->originalLayout = DATA_LAYOUT_NCHW;
     // netimpl->onnx_opset = onnx_opset;
 
+    // Collect model-level metadata_props (key/value string pairs).
+    netimpl->modelMetadata.clear();
+    int n_meta = model_proto.metadata_props_size();
+    for (int i = 0; i < n_meta; i++) {
+        const auto& entry = model_proto.metadata_props(i);
+        netimpl->modelMetadata[entry.key()] = entry.value();
+    }
+
     if (have_errors) {
         std::stringstream sstrm;
         sstrm << "DNN/ONNX: the model ";

@@ -589,5 +589,24 @@ ModelFormat Net::getModelFormat() const
     return impl->modelFormat;
 }
 
+std::vector<String> Net::getMetaDataKeys() const
+{
+    CV_Assert(impl);
+    std::vector<String> keys;
+    keys.reserve(impl->modelMetadata.size());
+    for (const auto& kv : impl->modelMetadata)
+        keys.push_back(kv.first);
+    return keys;
+}
+
+String Net::getMetaData(const String& key, const String& defaultVal) const
+{
+    CV_Assert(impl);
+    auto it = impl->modelMetadata.find(key);
+    if (it == impl->modelMetadata.end())
+        return defaultVal;
+    return it->second;
+}
+
 CV__DNN_INLINE_NS_END
 }}  // namespace cv::dnn

@@ -118,6 +118,9 @@ struct Net::Impl : public detail::NetImplBase
     DataLayout originalLayout;
     // int onnx_opset;
 
+    // ONNX metadata_props: key-value pairs from the model's metadata_props field.
+    std::map<std::string, std::string> modelMetadata;
+
     NamesHash argnames;
     NamesHash dimnames;
     NamesHash graphofs;
