@@ -5761,15 +5761,23 @@ int cv::connectedComponents(InputArray img_, OutputArray _labels, int connectivi
     _labels.create(img.size(), CV_MAT_DEPTH(ltype));
     cv::Mat labels = _labels.getMat();
     connectedcomponents::NoOp sop;
+    int nLabels = 0;
     if (ltype == CV_16U){
-        return connectedComponents_sub1(img, labels, connectivity, ccltype, sop);
+        nLabels = connectedComponents_sub1(img, labels, connectivity, ccltype, sop);
     }
     else if (ltype == CV_32S){
-        return connectedComponents_sub1(img, labels, connectivity, ccltype, sop);
+        nLabels = connectedComponents_sub1(img, labels, connectivity, ccltype, sop);
     }
     else{
         CV_Error(cv::Error::StsUnsupportedFormat, "the type of labels must be 16u or 32s");
     }
+    // Fix #17902: label 0 (background) should only be counted if at least one pixel is zero/background.
+    // The labeling algorithms always reserve label 0 for background (flattenL starts k=1), so when all
+    // pixels are non-zero the returned count includes an unused background label. Correct this here.
+    if (nLabels > 1 && cv::countNonZero(img) == img.rows * img.cols) {
+        --nLabels;
+    }
+    return nLabels;
 }
 
 // Simple wrapper to ensure binary and source compatibility (ABI)

@@ -238,6 +238,32 @@ TEST(Imgproc_ConnectedComponents, missing_background_pixels)
     EXPECT_TRUE(std::isnan(centroids.at<double>(0, 1)));
 }
 
+// Regression test for issue #17902: connectedComponents should not count background
+// label 0 when no pixel in the input is zero (all pixels are non-zero/foreground).
+// A fully non-zero single-channel image has exactly 1 foreground component.
+TEST(Imgproc_ConnectedComponents, fully_nonzero_single_component)
+{
+    // All-255 image: every pixel is foreground, no background pixels at all.
+    cv::Mat img(10, 10, CV_8U, cv::Scalar(255));
+
+    int ccltypes[] = {
+        cv::CCL_WU, cv::CCL_GRANA, cv::CCL_BOLELLI,
+        cv::CCL_SAUF, cv::CCL_BBDT, cv::CCL_SPAGHETTI
+    };
+    int connectivities[] = { 4, 8 };
+
+    for (int conn : connectivities)
+    {
+        for (int ccltype : ccltypes)
+        {
+            cv::Mat labels;
+            int n = cv::connectedComponents(img, labels, conn, CV_32S, ccltype);
+            EXPECT_EQ(n, 1) << "Expected 1 (no background) for all-255 image with "
+                            << "connectivity=" << conn << " ccltype=" << ccltype;
+        }
+    }
+}
+
 TEST(Imgproc_ConnectedComponents, spaghetti_bbdt_sauf_stats)
 {
     cv::Mat1b img({16, 16}, { (unsigned char)
@@ -858,6 +884,133 @@ TEST(Imgproc_ConnectedComponents, regression_27568)
                     connectedComponentsWithStats(
                         image, labels, stats, centroids, connectivity, CV_32S, ccltype));
             }
+        }
+    }
+}
+
+// Additional regression tests for issue #17902
+
+// 1. All-nonzero image treated as a single foreground component regardless of
+//    internal structure (two visually-distinct halves still share nonzero pixels
+//    across the boundary, so the whole image is one connected region).
+TEST(Imgproc_ConnectedComponents, fully_nonzero_multi_component)
+{
+    // 20x20 all-255 image — no zeros, so exactly 1 connected component.
+    cv::Mat img(20, 20, CV_8U, cv::Scalar(255));
+
+    int ccltypes[] = {
+        cv::CCL_WU, cv::CCL_GRANA, cv::CCL_BOLELLI,
+        cv::CCL_SAUF, cv::CCL_BBDT, cv::CCL_SPAGHETTI
+    };
+    int connectivities[] = { 4, 8 };
+
+    for (int conn : connectivities)
+    {
+        for (int ccltype : ccltypes)
+        {
+            cv::Mat labels;
+            int n = cv::connectedComponents(img, labels, conn, CV_32S, ccltype);
+            EXPECT_EQ(n, 1) << "Expected 1 component for 20x20 all-255 image with "
+                            << "connectivity=" << conn << " ccltype=" << ccltype;
+        }
+    }
+}
+
+// 2. All-zero image: the entire image is background (label 0).
+//    connectedComponents should return 1 (just the background label).
+TEST(Imgproc_ConnectedComponents, all_zero_image_returns_one)
+{
+    cv::Mat img = cv::Mat::zeros(10, 10, CV_8U);
+
+    int ccltypes[] = {
+        cv::CCL_WU, cv::CCL_GRANA, cv::CCL_BOLELLI,
+        cv::CCL_SAUF, cv::CCL_BBDT, cv::CCL_SPAGHETTI
+    };
+    int connectivities[] = { 4, 8 };
+
+    for (int conn : connectivities)
+    {
+        for (int ccltype : ccltypes)
+        {
+            cv::Mat labels;
+            int n = cv::connectedComponents(img, labels, conn, CV_32S, ccltype);
+            EXPECT_EQ(n, 1) << "Expected 1 (background only) for all-zero image with "
+                            << "connectivity=" << conn << " ccltype=" << ccltype;
+        }
+    }
+}
+
+// 3. Mixed foreground/background: black border (0), white interior (255).
+//    Should return 2 — label 0 (border background) + label 1 (interior foreground).
+TEST(Imgproc_ConnectedComponents, mixed_foreground_background)
+{
+    cv::Mat img = cv::Mat::zeros(10, 10, CV_8U);
+    // Fill inner 8x8 region with 255
+    img(cv::Rect(1, 1, 8, 8)).setTo(255);
+
+    int ccltypes[] = {
+        cv::CCL_WU, cv::CCL_GRANA, cv::CCL_BOLELLI,
+        cv::CCL_SAUF, cv::CCL_BBDT, cv::CCL_SPAGHETTI
+    };
+    int connectivities[] = { 4, 8 };
+
+    for (int conn : connectivities)
+    {
+        for (int ccltype : ccltypes)
+        {
+            cv::Mat labels;
+            int n = cv::connectedComponents(img, labels, conn, CV_32S, ccltype);
+            EXPECT_EQ(n, 2) << "Expected 2 (background + 1 foreground) for bordered image with "
+                            << "connectivity=" << conn << " ccltype=" << ccltype;
+        }
+    }
+}
+
+// 4. Single foreground pixel: 5x5 all-zero with one pixel at (2,2) set to 255.
+//    Should return 2 — background component + 1 foreground pixel.
+TEST(Imgproc_ConnectedComponents, single_pixel_foreground)
+{
+    cv::Mat img = cv::Mat::zeros(5, 5, CV_8U);
+    img.at<uchar>(2, 2) = 255;
+
+    int ccltypes[] = {
+        cv::CCL_WU, cv::CCL_GRANA, cv::CCL_BOLELLI,
+        cv::CCL_SAUF, cv::CCL_BBDT, cv::CCL_SPAGHETTI
+    };
+    int connectivities[] = { 4, 8 };
+
+    for (int conn : connectivities)
+    {
+        for (int ccltype : ccltypes)
+        {
+            cv::Mat labels;
+            int n = cv::connectedComponents(img, labels, conn, CV_32S, ccltype);
+            EXPECT_EQ(n, 2) << "Expected 2 (background + single pixel) with "
+                            << "connectivity=" << conn << " ccltype=" << ccltype;
+        }
+    }
+}
+
+// 5. Single-row all-nonzero image: 1x10 with all pixels set to 128.
+//    Should return 1 — no background, one connected component.
+TEST(Imgproc_ConnectedComponents, single_row_nonzero)
+{
+    cv::Mat img(1, 10, CV_8U, cv::Scalar(128));
+
+    int ccltypes[] = {
+        cv::CCL_WU, cv::CCL_GRANA, cv::CCL_BOLELLI,
+        cv::CCL_SAUF, cv::CCL_BBDT, cv::CCL_SPAGHETTI
+    };
+    int connectivities[] = { 4, 8 };
+
+    for (int conn : connectivities)
+    {
+        for (int ccltype : ccltypes)
+        {
+            cv::Mat labels;
+            int n = cv::connectedComponents(img, labels, conn, CV_32S, ccltype);
+            EXPECT_EQ(n, 1) << "Expected 1 for single-row all-128 image with "
+                            << "connectivity=" << conn << " ccltype=" << ccltype;
         }
     }
 }
