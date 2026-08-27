@@ -633,7 +633,7 @@ void fetchPointsNormalsColorsFromColorHashTsdfVolumeUnit(
     bool needColors(_colors.needed());
     Mutex mutex;
 
-    //TODO: same as HashTSDF - a 0-surface should be captured instead of all non-zero voxels
+    // Fixed: only emit voxels at the zero-crossing surface (issue #22896)
     auto HashFetchPointsNormalsColorsInvoker = [&](const Range& range)
     {
         std::vector<ptype> points, normals, colors;
@@ -645,6 +645,10 @@ void fetchPointsNormalsColorsFromColorHashTsdfVolumeUnit(
             if (it != volumeUnits.end())
             {
                 std::vector<ptype> localPoints, localNormals, localColors;
+                // Global base voxel index for this volume unit
+                Vec3i globalBase(tsdf_idx[0] << volumeUnitDegree,
+                                 tsdf_idx[1] << volumeUnitDegree,
+                                 tsdf_idx[2] << volumeUnitDegree);
                 for (int x = 0; x < volumeUnitResolution; x++)
                     for (int y = 0; y < volumeUnitResolution; y++)
                         for (int z = 0; z < volumeUnitResolution; z++)
@@ -653,21 +657,57 @@ void fetchPointsNormalsColorsFromColorHashTsdfVolumeUnit(
                             RGBTsdfVoxel voxel = _atColorHash(volUnitsData, voxelIdx, it->second.index,
                                                               volResolution.x, volDims);
 
-                            // floatToTsdf(1.0) == -128
+                            // floatToTsdf(1.0) == -128 (unobserved/out-of-range)
                             if (voxel.tsdf != -128 && voxel.weight != 0)
                             {
-                                Point3f point = base_point + voxelCoordToVolume(voxelIdx, voxelSize);
-                                localPoints.push_back(toPtype(pose * point));
-                                if (needNormals)
+                                // Only emit surface voxels: check if any face-neighbor has
+                                // opposite-sign TSDF (zero-crossing detection, issue #22896)
+                                float tsdfVal = tsdfToFloat(voxel.tsdf);
+                                bool isZeroCrossing = false;
+                                const Vec3i neighborOffsets[6] = {
+                                    {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+                                };
+                                for (int ni = 0; ni < 6 && !isZeroCrossing; ni++)
                                 {
-                                    Point3f normal = getNormalColorHashVoxel(point, voxelSizeInv, volumeUnitDegree,
-                                                                            volDims, volUnitsData, volumeUnits);
-                                    localNormals.push_back(toPtype(pose.rotation() * normal));
+                                    Vec3i neighborLocal = voxelIdx + neighborOffsets[ni];
+                                    RGBTsdfVoxel neighborVoxel;
+                                    if (neighborLocal[0] >= 0 && neighborLocal[0] < volumeUnitResolution &&
+                                        neighborLocal[1] >= 0 && neighborLocal[1] < volumeUnitResolution &&
+                                        neighborLocal[2] >= 0 && neighborLocal[2] < volumeUnitResolution)
+                                    {
+                                        neighborVoxel = _atColorHash(volUnitsData, neighborLocal, it->second.index,
+                                                                     volumeUnitResolution, volDims);
+                                    }
+                                    else
+                                    {
+                                        // Neighbor is in a different volume unit
+                                        Vec3i globalNeighbor = globalBase + voxelIdx + neighborOffsets[ni];
+                                        Vec3i neighborUnitIdx(globalNeighbor[0] >> volumeUnitDegree,
+                                                              globalNeighbor[1] >> volumeUnitDegree,
+                                                              globalNeighbor[2] >> volumeUnitDegree);
+                                        VolumeUnitIndexes::const_iterator neighborIt = volumeUnits.find(neighborUnitIdx);
+                                        neighborVoxel = atColorHashVolumeUnit(volUnitsData, volumeUnits, globalNeighbor, neighborUnitIdx, neighborIt, volumeUnitDegree, volDims);
+                                    }
+                                    if (neighborVoxel.weight != 0 &&
+                                        tsdfVal * tsdfToFloat(neighborVoxel.tsdf) < 0.f)
+                                        isZeroCrossing = true;
                                 }
-                                if (needColors)
+
+                                if (isZeroCrossing)
                                 {
-                                    Point3f c(float(voxel.r), float(voxel.g), float(voxel.b));
-                                    localColors.push_back(toPtype(c));
+                                    Point3f point = base_point + voxelCoordToVolume(voxelIdx, voxelSize);
+                                    localPoints.push_back(toPtype(pose * point));
+                                    if (needNormals)
+                                    {
+                                        Point3f normal = getNormalColorHashVoxel(point, voxelSizeInv, volumeUnitDegree,
+                                                                                volDims, volUnitsData, volumeUnits);
+                                        localNormals.push_back(toPtype(pose.rotation() * normal));
+                                    }
+                                    if (needColors)
+                                    {
+                                        Point3f c(float(voxel.r), float(voxel.g), float(voxel.b));
+                                        localColors.push_back(toPtype(c));
+                                    }
                                 }
                             }
                         }

@@ -1357,7 +1357,7 @@ void fetchPointsNormalsFromHashTsdfVolumeUnit(
     bool needNormals(_normals.needed());
     Mutex mutex;
 
-    //TODO: this is incorrect; a 0-surface should be captured instead of all non-zero voxels
+    // Fixed: only emit voxels at the zero-crossing surface (issue #22896)
     auto HashFetchPointsNormalsInvoker = [&](const Range& range)
     {
         std::vector<ptype> points, normals;
@@ -1371,6 +1371,10 @@ void fetchPointsNormalsFromHashTsdfVolumeUnit(
             {
                 std::vector<ptype> localPoints;
                 std::vector<ptype> localNormals;
+                // Global base voxel index for this volume unit
+                Vec3i globalBase(tsdf_idx[0] << volumeUnitDegree,
+                                 tsdf_idx[1] << volumeUnitDegree,
+                                 tsdf_idx[2] << volumeUnitDegree);
                 for (int x = 0; x < volumeUnitResolution; x++)
                     for (int y = 0; y < volumeUnitResolution; y++)
                         for (int z = 0; z < volumeUnitResolution; z++)
@@ -1378,15 +1382,50 @@ void fetchPointsNormalsFromHashTsdfVolumeUnit(
                             cv::Vec3i voxelIdx(x, y, z);
                             TsdfVoxel voxel = _at(volUnitsData, voxelIdx, it->second.index, volResolution.x, volDims);
 
-                            // floatToTsdf(1.0) == -128
+                            // floatToTsdf(1.0) == -128 (unobserved/out-of-range)
                             if (voxel.tsdf != -128 && voxel.weight != 0)
                             {
-                                Point3f point = base_point + voxelCoordToVolume(voxelIdx, voxelSize);
-                                localPoints.push_back(toPtype(pose * point));
-                                if (needNormals)
+                                // Only emit surface voxels: check if any face-neighbor has
+                                // opposite-sign TSDF (zero-crossing detection, issue #22896)
+                                float tsdfVal = tsdfToFloat(voxel.tsdf);
+                                bool isZeroCrossing = false;
+                                const Vec3i neighborOffsets[6] = {
+                                    {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+                                };
+                                for (int ni = 0; ni < 6 && !isZeroCrossing; ni++)
                                 {
-                                    Point3f normal = getNormalVoxel(point, voxelSizeInv, volumeUnitDegree, volDims, volUnitsData, volumeUnits);
-                                    localNormals.push_back(toPtype(pose.rotation() * normal));
+                                    Vec3i neighborLocal = voxelIdx + neighborOffsets[ni];
+                                    TsdfVoxel neighborVoxel;
+                                    if (neighborLocal[0] >= 0 && neighborLocal[0] < volumeUnitResolution &&
+                                        neighborLocal[1] >= 0 && neighborLocal[1] < volumeUnitResolution &&
+                                        neighborLocal[2] >= 0 && neighborLocal[2] < volumeUnitResolution)
+                                    {
+                                        neighborVoxel = _at(volUnitsData, neighborLocal, it->second.index, volumeUnitResolution, volDims);
+                                    }
+                                    else
+                                    {
+                                        // Neighbor is in a different volume unit
+                                        Vec3i globalNeighbor = globalBase + voxelIdx + neighborOffsets[ni];
+                                        Vec3i neighborUnitIdx(globalNeighbor[0] >> volumeUnitDegree,
+                                                              globalNeighbor[1] >> volumeUnitDegree,
+                                                              globalNeighbor[2] >> volumeUnitDegree);
+                                        VolumeUnitIndexes::const_iterator neighborIt = volumeUnits.find(neighborUnitIdx);
+                                        neighborVoxel = atVolumeUnit(volUnitsData, volumeUnits, globalNeighbor, neighborUnitIdx, neighborIt, volumeUnitDegree, volDims);
+                                    }
+                                    if (neighborVoxel.weight != 0 &&
+                                        tsdfVal * tsdfToFloat(neighborVoxel.tsdf) < 0.f)
+                                        isZeroCrossing = true;
+                                }
+
+                                if (isZeroCrossing)
+                                {
+                                    Point3f point = base_point + voxelCoordToVolume(voxelIdx, voxelSize);
+                                    localPoints.push_back(toPtype(pose * point));
+                                    if (needNormals)
+                                    {
+                                        Point3f normal = getNormalVoxel(point, voxelSizeInv, volumeUnitDegree, volDims, volUnitsData, volumeUnits);
+                                        localNormals.push_back(toPtype(pose.rotation() * normal));
+                                    }
                                 }
                             }
                         }
@@ -1486,7 +1525,7 @@ void ocl_fetchPointsNormalsFromHashTsdfVolumeUnit(
     bool needNormals(_normals.needed());
     Mutex mutex;
 
-    //TODO: this is incorrect; a 0-surface should be captured instead of all non-zero voxels
+    // Fixed: only emit voxels at the zero-crossing surface (issue #22896)
     auto _HashFetchPointsNormalsInvoker = [&](const Range& range)
     {
         std::vector<ptype> points, normals;
@@ -1499,6 +1538,10 @@ void ocl_fetchPointsNormalsFromHashTsdfVolumeUnit(
 
             std::vector<ptype> localPoints;
             std::vector<ptype> localNormals;
+            // Global base voxel index for this volume unit
+            Vec3i globalBase(idx[0] << volumeUnitDegree,
+                             idx[1] << volumeUnitDegree,
+                             idx[2] << volumeUnitDegree);
             for (int x = 0; x < volumeUnitResolution; x++)
                 for (int y = 0; y < volumeUnitResolution; y++)
                     for (int z = 0; z < volumeUnitResolution; z++)
@@ -1506,16 +1549,50 @@ void ocl_fetchPointsNormalsFromHashTsdfVolumeUnit(
                         cv::Vec3i voxelIdx(x, y, z);
                         TsdfVoxel voxel = new_at(volUnitsDataCopy, voxelIdx, row, volumeUnitResolution, volDims);
 
-                        // floatToTsdf(1.0) == -128
+                        // floatToTsdf(1.0) == -128 (unobserved/out-of-range)
                         if (voxel.tsdf != -128 && voxel.weight != 0)
                         {
-                            Point3f point = base_point + voxelCoordToVolume(voxelIdx, voxelSize);
-
-                            localPoints.push_back(toPtype(pose * point));
-                            if (needNormals)
+                            // Only emit surface voxels: check if any face-neighbor has
+                            // opposite-sign TSDF (zero-crossing detection, issue #22896)
+                            float tsdfVal = tsdfToFloat(voxel.tsdf);
+                            bool isZeroCrossing = false;
+                            const Vec3i neighborOffsets[6] = {
+                                {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+                            };
+                            for (int ni = 0; ni < 6 && !isZeroCrossing; ni++)
                             {
-                                Point3f normal = ocl_getNormalVoxel(point, voxelSizeInv, volumeUnitDegree, volDims, volUnitsDataCopy, hashTable);
-                                localNormals.push_back(toPtype(pose.rotation() * normal));
+                                Vec3i neighborLocal = voxelIdx + neighborOffsets[ni];
+                                TsdfVoxel neighborVoxel;
+                                if (neighborLocal[0] >= 0 && neighborLocal[0] < volumeUnitResolution &&
+                                    neighborLocal[1] >= 0 && neighborLocal[1] < volumeUnitResolution &&
+                                    neighborLocal[2] >= 0 && neighborLocal[2] < volumeUnitResolution)
+                                {
+                                    neighborVoxel = new_at(volUnitsDataCopy, neighborLocal, row, volumeUnitResolution, volDims);
+                                }
+                                else
+                                {
+                                    // Neighbor is in a different volume unit
+                                    Vec3i globalNeighbor = globalBase + voxelIdx + neighborOffsets[ni];
+                                    Vec3i neighborUnitIdx(globalNeighbor[0] >> volumeUnitDegree,
+                                                          globalNeighbor[1] >> volumeUnitDegree,
+                                                          globalNeighbor[2] >> volumeUnitDegree);
+                                    int neighborIdx = hashTable.find(neighborUnitIdx);
+                                    neighborVoxel = new_atVolumeUnit(volUnitsDataCopy, globalNeighbor, neighborUnitIdx, neighborIdx, volumeUnitDegree, volDims);
+                                }
+                                if (neighborVoxel.weight != 0 &&
+                                    tsdfVal * tsdfToFloat(neighborVoxel.tsdf) < 0.f)
+                                    isZeroCrossing = true;
+                            }
+
+                            if (isZeroCrossing)
+                            {
+                                Point3f point = base_point + voxelCoordToVolume(voxelIdx, voxelSize);
+                                localPoints.push_back(toPtype(pose * point));
+                                if (needNormals)
+                                {
+                                    Point3f normal = ocl_getNormalVoxel(point, voxelSizeInv, volumeUnitDegree, volDims, volUnitsDataCopy, hashTable);
+                                    localNormals.push_back(toPtype(pose.rotation() * normal));
+                                }
                             }
                         }
                     }
