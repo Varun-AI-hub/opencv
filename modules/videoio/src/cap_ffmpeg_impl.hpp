@@ -2242,6 +2242,15 @@ double CvCapture_FFMPEG::get_fps() const
 
 int64_t CvCapture_FFMPEG::get_total_frames() const
 {
+    // NOTE: this returns metadata-derived frame count, not the number of
+    // frames that can actually be decoded.  The stream's nb_frames field is
+    // populated by the container (e.g. AVI/MKV index), or estimated from
+    // duration * fps when that field is unavailable.  Either way the value
+    // comes from container headers and is reported before any decoding takes
+    // place.  If the first grabFrame() / read() fails (e.g. due to a corrupt
+    // or unsupported codec), this function will still return the metadata
+    // count.  Callers must not rely on CAP_PROP_FRAME_COUNT alone; they must
+    // check the return value of grab()/read() on every iteration.
     int64_t nbf = ic->streams[video_stream]->nb_frames;
 
     if (nbf == 0)

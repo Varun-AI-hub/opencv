@@ -138,6 +138,12 @@ enum VideoCaptureProperties {
        CAP_PROP_FPS            =5, //!< Frame rate.
        CAP_PROP_FOURCC         =6, //!< 4-character code of codec. see VideoWriter::fourcc .
        CAP_PROP_FRAME_COUNT    =7, //!< Number of frames in the video file.
+                                   //!< @note The value is derived from container/file metadata (e.g. duration * fps or
+                                   //!< the stream nb_frames field) and reflects what the container reports — it is
+                                   //!< **not** verified by actually decoding frames.  In particular, if the decoder
+                                   //!< fails on the very first VideoCapture::read() call this property may still
+                                   //!< return a positive number.  Always check the return value of read() or grab()
+                                   //!< rather than iterating solely based on CAP_PROP_FRAME_COUNT.
        CAP_PROP_FORMAT         =8, //!< Format of the %Mat objects (see Mat::type()) returned by VideoCapture::retrieve().
                                    //!< Set value -1 to fetch undecoded RAW video streams (as Mat 8UC1). Default is 8UC3. FFmpeg backend supports 8UC4 with alpha, if it's available.
        CAP_PROP_MODE           =9, //!< Backend-specific value indicating the current capture mode.
