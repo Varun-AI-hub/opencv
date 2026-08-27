@@ -243,6 +243,18 @@ static void preparePyramidNormalsMask(const std::vector<UMat> &pyramidNormals, c
 }
 
 
+/**
+ * @brief Prepare base RGB data for an odometry frame.
+ *
+ * Converts the colour image to grayscale and builds image/mask/depth pyramids
+ * needed by the RGB odometry residual.  Depth is **optional**: when the frame
+ * carries no depth map (OdometryType::RGB pure-photometric mode) the function
+ * skips depth scaling and depth-based mask filtering and builds a simple
+ * all-valid mask pyramid instead.  Frames that do carry depth (OdometryType::RGB_DEPTH)
+ * are handled exactly as before.
+ *
+ * @see issue #23103 – spurious CV_Assert(!depth.empty()) when depth is absent.
+ */
 static void prepareRGBFrameBase(OdometryFrame& frame, OdometrySettings settings)
 {
     UMat grayImage;
@@ -264,30 +276,44 @@ static void prepareRGBFrameBase(OdometryFrame& frame, OdometrySettings settings)
         frame.impl->imageGray = grayImage;
     }
 
+    // Depth is optional for OdometryType::RGB (pure photometric tracking).
+    // Only scale and use depth when the frame actually carries one.
+    UMat rawDepth;
+    frame.getDepth(rawDepth);
+    bool hasDepth = !rawDepth.empty();
+
     //TODO: don't use scaled when scale bug is fixed
     UMat scaledDepth;
     frame.getProcessedDepth(scaledDepth);
-    if (scaledDepth.empty())
+    if (scaledDepth.empty() && hasDepth)
     {
         scaledDepth = prepareScaledDepth(frame);
         CV_Assert(scaledDepth.size() == grayImage.size());
     }
 
-    UMat depthMask;
-    // ignore small, negative, Inf, NaN values
-    cv::compare(scaledDepth, Scalar(FLT_EPSILON), depthMask, CMP_GT);
-
     UMat mask;
     frame.getMask(mask);
-    if (mask.empty())
+    if (hasDepth)
     {
-        frame.impl->mask = depthMask;
+        UMat depthMask;
+        // ignore small, negative, Inf, NaN values
+        cv::compare(scaledDepth, Scalar(FLT_EPSILON), depthMask, CMP_GT);
+
+        if (mask.empty())
+        {
+            frame.impl->mask = depthMask;
+        }
+        else
+        {
+            CV_Assert(mask.type() == CV_8UC1 || mask.type() == CV_8SC1 || mask.type() == CV_BoolC1);
+            CV_Assert(mask.size() == grayImage.size());
+            cv::bitwise_and(mask, depthMask, frame.impl->mask);
+        }
     }
-    else
+    else if (mask.empty())
     {
-        CV_Assert(mask.type() == CV_8UC1 || mask.type() == CV_8SC1 || mask.type() == CV_BoolC1);
-        CV_Assert(mask.size() == grayImage.size());
-        cv::bitwise_and(mask, depthMask, frame.impl->mask);
+        // RGB-only mode with no depth: treat every pixel as valid
+        frame.impl->mask = UMat(grayImage.size(), CV_8UC1, Scalar(255));
     }
     frame.getMask(mask);
 
@@ -299,13 +325,23 @@ static void prepareRGBFrameBase(OdometryFrame& frame, OdometrySettings settings)
     if (ipyramids.empty())
         buildPyramid(grayImage, ipyramids, maxLevel);
 
-    std::vector<UMat>& dpyramids = frame.impl->pyramids[OdometryFramePyramidType::PYR_DEPTH];
-    if (dpyramids.empty())
-        preparePyramidDepth(scaledDepth, dpyramids, maxLevel);
+    if (hasDepth)
+    {
+        std::vector<UMat>& dpyramids = frame.impl->pyramids[OdometryFramePyramidType::PYR_DEPTH];
+        if (dpyramids.empty())
+            preparePyramidDepth(scaledDepth, dpyramids, maxLevel);
 
-    std::vector<UMat>& mpyramids = frame.impl->pyramids[OdometryFramePyramidType::PYR_MASK];
-    if (mpyramids.empty())
-        preparePyramidMask(mask, dpyramids, maxLevel + 1, settings.getMinDepth(), settings.getMaxDepth(), mpyramids);
+        std::vector<UMat>& mpyramids = frame.impl->pyramids[OdometryFramePyramidType::PYR_MASK];
+        if (mpyramids.empty())
+            preparePyramidMask(mask, dpyramids, maxLevel + 1, settings.getMinDepth(), settings.getMaxDepth(), mpyramids);
+    }
+    else
+    {
+        // RGB-only mode: build mask pyramid without depth-range filtering
+        std::vector<UMat>& mpyramids = frame.impl->pyramids[OdometryFramePyramidType::PYR_MASK];
+        if (mpyramids.empty())
+            buildPyramid(mask, mpyramids, maxLevel);
+    }
 }
 
 

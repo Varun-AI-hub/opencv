@@ -459,6 +459,53 @@ void OdometryTest::processedDepthCheck()
 *                                Tests registrations                                     *
 \****************************************************************************************/
 
+// Regression test for issue #23103:
+// prepareRGBFrameBase must NOT assert when depth is absent (OdometryType::RGB).
+TEST(RGBD_Odometry_Rgb, prepareFrame_no_depth)
+{
+    // Build a synthetic grayscale image — no depth map at all.
+    const int W = 64, H = 48;
+    Mat image(H, W, CV_8UC1);
+    randu(image, Scalar(0), Scalar(255));
+
+    Mat K = OdometryTest::getCameraMatrix();
+    OdometrySettings ods;
+    ods.setCameraMatrix(K);
+
+    Odometry odometry(OdometryType::RGB, ods, OdometryAlgoType::COMMON);
+
+    // Pass noArray() (empty) as depth — this used to trigger CV_Assert(!depth.empty())
+    // inside prepareScaledDepth via prepareRGBFrameBase. After the fix it must succeed.
+    OdometryFrame odf(noArray(), image);
+    ASSERT_NO_THROW(odometry.prepareFrame(odf))
+        << "prepareFrame crashed for RGB-only OdometryFrame with no depth (issue #23103)";
+
+    // Image pyramid must have been built.
+    std::vector<int> iters;
+    ods.getIterCounts(iters);
+    EXPECT_EQ((int)odf.getPyramidLevels(), (int)iters.size());
+
+    Mat gray;
+    odf.getGrayImage(gray);
+    EXPECT_FALSE(gray.empty());
+
+    Mat mask;
+    odf.getMask(mask);
+    EXPECT_FALSE(mask.empty());
+    // All pixels should be valid (255) since there is no depth to mask out.
+    int nzCount = countNonZero(mask);
+    EXPECT_EQ(nzCount, W * H);
+
+    // Depth-related outputs must remain empty for a depth-less RGB frame.
+    Mat scaledDepth;
+    odf.getProcessedDepth(scaledDepth);
+    EXPECT_TRUE(scaledDepth.empty());
+
+    Mat depthPyr;
+    odf.getPyramidAt(depthPyr, OdometryFramePyramidType::PYR_DEPTH, 0);
+    EXPECT_TRUE(depthPyr.empty());
+}
+
 TEST(RGBD_Odometry_Rgb, algorithmic)
 {
     OdometryTest test(OdometryType::RGB, OdometryAlgoType::COMMON, 0.99, 0.99);
