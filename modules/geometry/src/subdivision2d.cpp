@@ -232,7 +232,14 @@ int Subdiv2D::isRightOf(Point2f pt, int edge) const
     edgeDst(edge, &dst);
     double cw_area = triangleArea( pt, dst, org );
 
-    return (cw_area > 0) - (cw_area < 0);
+    // Use a coordinate-scaled epsilon to avoid misclassifying near-collinear
+    // points due to floating-point cancellation (issue #16763).
+    // triangleArea is O(r^2), so its rounding error is O(FLT_EPSILON * r^2).
+    double maxCoord = std::max({std::abs((double)pt.x), std::abs((double)pt.y),
+                                std::abs((double)org.x), std::abs((double)org.y),
+                                std::abs((double)dst.x), std::abs((double)dst.y), 1.0});
+    const double eps = FLT_EPSILON * maxCoord * maxCoord;
+    return (cw_area > eps) - (cw_area < -eps);
 }
 
 int Subdiv2D::newEdge()
@@ -360,6 +367,40 @@ int Subdiv2D::locate(Point2f pt, int& _edge, int& _vertex)
 
     recentEdge = edge;
 
+    if( location == PTLOC_ERROR )
+    {
+        // The walk exhausted its iteration budget — likely a cycle caused by
+        // near-degenerate geometry.  Fall back to an O(n) linear scan over
+        // every triangular face to find one that contains pt (issue #16763).
+        for( int e = 4; e < maxEdges && location == PTLOC_ERROR; e += 2 )
+        {
+            int qeidx = e >> 2;
+            if( (size_t)qeidx >= qedges.size() || qedges[qeidx].isfree() )
+                continue;
+            int e2 = getEdge(e, NEXT_AROUND_LEFT);
+            int e3 = getEdge(e2, NEXT_AROUND_LEFT);
+            if( getEdge(e3, NEXT_AROUND_LEFT) != e )
+                continue; // not a closed triangular face
+            Point2f a, b, c;
+            edgeOrg(e,  &a);
+            edgeOrg(e2, &b);
+            edgeOrg(e3, &c);
+            // A point is inside the triangle (regardless of winding) when all
+            // three sub-triangle signed areas share the same sign.
+            double ta = triangleArea(a, b, pt);
+            double tb = triangleArea(b, c, pt);
+            double tc = triangleArea(c, a, pt);
+            bool inside = (ta >= 0 && tb >= 0 && tc >= 0) ||
+                          (ta <= 0 && tb <= 0 && tc <= 0);
+            if( inside )
+            {
+                edge = e;
+                location = PTLOC_INSIDE;
+                recentEdge = edge;
+            }
+        }
+    }
+
     if( location == PTLOC_INSIDE )
     {
         Point2f org_pt, dst_pt;
@@ -409,12 +450,22 @@ int Subdiv2D::locate(Point2f pt, int& _edge, int& _vertex)
 inline int
 isPtInCircle3( Point2f pt, Point2f a, Point2f b, Point2f c)
 {
-    const double eps = FLT_EPSILON*0.125;
     double val = ((double)a.x * a.x + (double)a.y * a.y) * triangleArea( b, c, pt );
     val -= ((double)b.x * b.x + (double)b.y * b.y) * triangleArea( a, c, pt );
     val += ((double)c.x * c.x + (double)c.y * c.y) * triangleArea( a, b, pt );
     val -= ((double)pt.x * pt.x + (double)pt.y * pt.y) * triangleArea( a, b, c );
 
+    // Scale epsilon to the coordinate magnitude so that near-cocircular
+    // configurations are handled robustly regardless of coordinate scale.
+    // Each term of val is O(r^4), so the floating-point rounding error is
+    // also O(FLT_EPSILON * r^4).  The fixed epsilon of FLT_EPSILON*0.125
+    // was too small for coordinates much larger than 1, causing incorrect
+    // flip decisions for near-degenerate configurations (issue #16763).
+    double maxCoord = std::max({std::abs((double)pt.x), std::abs((double)pt.y),
+                                std::abs((double)a.x),  std::abs((double)a.y),
+                                std::abs((double)b.x),  std::abs((double)b.y),
+                                std::abs((double)c.x),  std::abs((double)c.y), 1.0});
+    const double eps = FLT_EPSILON * maxCoord * maxCoord * maxCoord * maxCoord * 16.0;
     return val > eps ? 1 : val < -eps ? -1 : 0;
 }
 

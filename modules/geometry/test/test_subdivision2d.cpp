@@ -65,6 +65,28 @@ TEST(Imgproc_Subdiv2D, issue_25696) {
     ASSERT_EQ(static_cast<size_t>(2), triangles.size());
 }
 
+// Regression test for https://github.com/opencv/opencv/issues/16763
+// Four points forming a square are all cocircular, so there are two equally
+// valid Delaunay triangulations.  Fragile code would fail the in-circle test
+// due to catastrophic cancellation and return 0 or 1 triangles instead of 2.
+TEST(Imgproc_Subdiv2D, issue_16763_square_triangulation)
+{
+    // Square with vertices well inside a 100x100 rect
+    cv::Rect rect(0, 0, 100, 100);
+    cv::Subdiv2D subdiv(rect);
+
+    subdiv.insert(cv::Point2f(10.f, 10.f));
+    subdiv.insert(cv::Point2f(90.f, 10.f));
+    subdiv.insert(cv::Point2f(90.f, 90.f));
+    subdiv.insert(cv::Point2f(10.f, 90.f));
+
+    std::vector<cv::Vec6f> triangles;
+    subdiv.getTriangleList(triangles);
+
+    // A square split along either diagonal always produces exactly 2 triangles
+    EXPECT_EQ(2, (int)triangles.size());
+}
+
 // Initialization test
 TEST(Imgproc_Subdiv2D, rect2f_constructor_and_init)
 {
