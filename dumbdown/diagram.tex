@@ -1,0 +1,70 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{matrix,arrows.meta,positioning,fit,backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  cell/.style={draw, minimum size=0.6cm, inner sep=0},
+  whitecell/.style={cell, fill=white},
+  yellowcell/.style={cell, fill=yellow!80},
+  redcell/.style={cell, fill=red!20},
+  font=\small
+]
+
+%% ---- INPUT GRID (all white) ----
+\node[above] at (1.2, 2.7) {\textbf{Input Image}};
+\node[below] at (1.2, -0.1) {\small All pixels = 255 (white)};
+
+\foreach \r in {0,1,2,3} {
+  \foreach \c in {0,1,2,3} {
+    \node[whitecell] at (\c*0.6, \r*0.6) {};
+  }
+}
+
+%% ---- ARROW ----
+\draw[-{Stealth}, thick] (2.6, 1.2) -- (4.0, 1.2)
+  node[midway, above, font=\footnotesize] {connectedComponents()};
+
+%% ---- CORRECT OUTPUT ----
+\node[above] at (5.6, 2.7) {\textbf{Correct Output}};
+\node[below, align=center] at (5.6, -0.1) {\small \textcolor{green!60!black}{count = 1}};
+
+\foreach \r in {0,1,2,3} {
+  \foreach \c in {0,1,2,3} {
+    \node[yellowcell] at (4.2 + \c*0.6, \r*0.6) {};
+    \node[font=\tiny] at (4.2 + \c*0.6, \r*0.6) {1};
+  }
+}
+
+%% ---- SEPARATOR ----
+\draw[dashed, gray] (3.3, -0.8) -- (3.3, 3.5);
+
+%% ---- BUG SECTION HEADER ----
+\node[red, font=\bfseries] at (3.3, 3.8) {--- BUG (before fix) ---};
+
+%% ---- BUGGY OUTPUT ----
+\node[above] at (7.8, 2.7) {\textbf{Buggy Output}};
+\node[below, align=center] at (7.8, -0.1)
+  {\small \textcolor{red}{count = 2 (WRONG)}\\[-2pt]\tiny phantom group 0};
+
+\foreach \r in {0,1,2,3} {
+  \foreach \c in {0,1,2,3} {
+    \node[redcell] at (6.6 + \c*0.6, \r*0.6) {};
+    \node[font=\tiny] at (6.6 + \c*0.6, \r*0.6) {1};
+  }
+}
+
+%% phantom ghost label
+\node[draw=red, dashed, rounded corners, fill=red!10, font=\footnotesize,
+      align=center] at (7.8, -1.5)
+  {Phantom group 0\\(no pixels, but still counted!)};
+\draw[-{Stealth}, red, dashed] (7.8, -1.1) -- (7.8, -0.35);
+
+%% ---- LEGEND ----
+\node[yellowcell, minimum size=0.4cm] at (0.2, -2.0) {};
+\node[right, font=\footnotesize] at (0.5, -2.0) {Label 1 (real group)};
+\node[redcell, minimum size=0.4cm] at (3.0, -2.0) {};
+\node[right, font=\footnotesize] at (3.3, -2.0) {Label 1 in buggy output};
+
+\end{tikzpicture}
+\end{document}
