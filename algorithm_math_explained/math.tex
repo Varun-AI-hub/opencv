@@ -1,0 +1,306 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+
+\geometry{margin=1in}
+
+\title{\textbf{Video Decoding Pipeline: Full Mathematical Exposition}\\
+\large Entropy Coding, Motion Compensation, and Hardware Acceleration}
+\author{OpenCV Project --- Algorithm Documentation}
+\date{2024}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{Video Compression Fundamentals}
+%----------------------------------------------------------------------
+
+\subsection{Spatial Redundancy: Discrete Cosine Transform}
+
+Video codecs exploit the observation that neighbouring pixels are highly correlated.
+The 2-D DCT (Type-II) of an $8\times8$ block $f(x,y)$ is:
+\begin{equation}
+F(u,v) = \frac{1}{4}\,C(u)\,C(v)
+\sum_{x=0}^{7}\sum_{y=0}^{7}
+f(x,y)
+\cos\!\frac{(2x+1)u\pi}{16}
+\cos\!\frac{(2y+1)v\pi}{16},
+\label{eq:dct}
+\end{equation}
+where
+\[
+C(k) = \begin{cases} 1/\sqrt{2} & k = 0 \\ 1 & k \geq 1 \end{cases}
+\]
+The inverse (IDCT) recovers $f$ from coefficients $F$:
+\begin{equation}
+f(x,y) = \frac{1}{4}
+\sum_{u=0}^{7}\sum_{v=0}^{7}
+C(u)\,C(v)\,F(u,v)
+\cos\!\frac{(2x+1)u\pi}{16}
+\cos\!\frac{(2y+1)v\pi}{16}.
+\label{eq:idct}
+\end{equation}
+
+\begin{remark}
+Energy compaction: for natural images the top-left DCT coefficients (low spatial frequencies)
+contain $\approx 90\%$ of the signal energy.  Quantisation sets high-frequency
+coefficients to zero, achieving lossy compression.
+\end{remark}
+
+\subsection{Quantisation}
+
+The quantised coefficient matrix $Q(u,v)$ is:
+\begin{equation}
+\hat{F}(u,v) = \left\lfloor \frac{F(u,v)}{q(u,v)} + \tfrac{1}{2} \right\rfloor,
+\label{eq:quant}
+\end{equation}
+where $q(u,v)$ is the quantisation step-size matrix (scaled by the QP parameter).
+The inverse step multiplies back: $\tilde{F}(u,v) = \hat{F}(u,v) \cdot q(u,v)$.
+
+\subsection{Temporal Redundancy: Motion Estimation and Compensation}
+
+Consecutive frames $P_t$ and $P_{t-1}$ are highly similar.  For each macroblock (MB) in
+$P_t$, a \emph{motion vector} $\mathbf{v} = (v_x, v_y)$ is found such that:
+\begin{equation}
+\text{SAD}(\mathbf{v}) = \sum_{(x,y)\in\text{MB}}\bigl|P_t(x,y) - P_{t-1}(x+v_x,\,y+v_y)\bigr|
+\label{eq:sad}
+\end{equation}
+is minimised.  The \emph{prediction residual} is encoded and transmitted:
+\begin{equation}
+R(x,y) = P_t(x,y) - P_{t-1}(x+v_x, y+v_y).
+\label{eq:residual}
+\end{equation}
+
+\subsection{Entropy Coding}
+
+\subsubsection{Huffman Coding}
+
+Given a symbol alphabet $\{s_i\}$ with probabilities $\{p_i\}$, Huffman coding produces
+prefix-free codes of expected length
+\[
+\bar{L}_{\text{Huffman}} \leq H(\{p_i\}) + 1,
+\]
+where $H(\{p_i\}) = -\sum_i p_i \log_2 p_i$ bits is the entropy.
+
+\subsubsection{CABAC (Context-Adaptive Binary Arithmetic Coding)}
+
+CABAC (used in H.264 and H.265) approximates arithmetic coding.  Each binary symbol $b$
+has a context model maintaining probability estimate $p(b=0)$.  The arithmetic coder
+maps the interval $[0,1)$ recursively:
+\begin{align}
+\text{low}  &\leftarrow \text{low} + \text{range} \cdot p(b=1), \quad \text{if } b = 1,\\
+\text{range}&\leftarrow \text{range} \cdot p(b),
+\end{align}
+then renormalise to keep range $\in [256, 512)$ (integer CABAC).
+
+CABAC achieves code length within $\approx 0.1$ bits/symbol of entropy.
+
+%----------------------------------------------------------------------
+\section{H.264/HEVC Decoder Pipeline}
+%----------------------------------------------------------------------
+
+\subsection{NAL Unit Structure}
+
+The bitstream is packetised into \emph{Network Abstraction Layer} (NAL) units.
+Each NAL unit carries one or more \emph{slices}.  A slice header specifies:
+slice type (I/P/B), QP delta, reference picture list, deblocking parameters.
+
+\subsection{Frame Types}
+
+\begin{description}
+\item[I-frame] Intra-coded; no inter-prediction; self-contained.
+\item[P-frame] Predicted from one past reference frame; motion vectors + residuals.
+\item[B-frame] Bi-predicted from one past \emph{and} one future reference frame.  The
+prediction is a weighted average:
+\[
+\hat{P}(x,y) = w_0 \cdot \text{ref}_0(x+v_{0x},y+v_{0y})
+             + w_1 \cdot \text{ref}_1(x+v_{1x},y+v_{1y}),
+\quad w_0+w_1=1.
+\]
+\end{description}
+
+\subsection{Decoded Picture Buffer (DPB) Management}
+
+The DPB holds reference frames.  Maximum DPB size in H.264 at Level 4.1 is
+$\leq 12{,}288$ KB, accommodating up to $\sim 12$ full-HD frames.
+Frames are marked as \emph{short-term}, \emph{long-term}, or \emph{unused};
+the sliding window and MMCO (Memory Management Control Operation) commands
+govern eviction.
+
+%----------------------------------------------------------------------
+\section{GPU Hardware Decode (NVDEC / CUVID)}
+%----------------------------------------------------------------------
+
+\subsection{Fixed-Function Hardware}
+
+NVDEC provides dedicated silicon for:
+\begin{enumerate}
+\item \textbf{Entropy decode engine}: dedicated CABAC/CAVLC state machines operating in
+      parallel with shader cores.
+\item \textbf{Inverse quantisation and IDCT}: Eq.~\eqref{eq:idct} in fixed-point hardware.
+\item \textbf{Motion compensation engine}: sub-pixel interpolation for half-pel and
+      quarter-pel motion vectors.
+\item \textbf{Deblocking/SAO filter}: H.265 Sample-Adaptive Offset in hardware.
+\end{enumerate}
+
+\subsection{Zero-Copy Path}
+
+With GPU hardware decode, the decoded YUV surface resides in VRAM.  The OpenCV CUDA
+pipeline keeps the frame on GPU:
+\[
+\underbrace{\text{NVDEC} \to \text{VRAM (NV12)}}_{\text{hardware path}}
+\xrightarrow{\text{cv::cuda::GpuMat}}
+\underbrace{\text{cvtColor} \to \text{RGB GpuMat}}_{\text{CUDA kernel}},
+\]
+avoiding PCIe transfers entirely.  The CPU path would incur $\sim B_\text{PCIe}^{-1}$
+latency for each frame, where $B_\text{PCIe} \approx 16$ GB/s for PCIe 4.0 $\times 16$.
+
+\subsection{Throughput Comparison}
+
+For a software H.264 decoder on a modern CPU core:
+\[
+\text{fps}_{\text{CPU}} \approx \frac{f_{\text{CPU}}\cdot\text{IPC}}{C_{\text{MB/frame}}\cdot C_{\text{cyc/MB}}},
+\]
+whereas NVDEC throughput for 1080p H.264 is nominally 240 fps (Turing class GPU),
+yielding:
+\[
+\text{fps}_{\text{GPU}} \gg \text{fps}_{\text{CPU}}
+\]
+because the entropy decode silicon operates independently of shader utilisation.
+
+%----------------------------------------------------------------------
+\section{YUV to RGB Colour Conversion}
+%----------------------------------------------------------------------
+
+H.264/HEVC output is in \emph{YUV 4:2:0} (NV12 on NVDEC).  Chroma planes $U, V$ are
+subsampled by 2 in each dimension.  After bilinear chroma upsampling, the BT.601
+conversion to full-range RGB is:
+\begin{equation}
+\begin{pmatrix}R\\G\\B\end{pmatrix}
+=
+\begin{pmatrix}
+1 & 0       & 1.402 \\
+1 & -0.344  & -0.714 \\
+1 & 1.772   & 0
+\end{pmatrix}
+\begin{pmatrix}Y \\ U - 128 \\ V - 128\end{pmatrix}.
+\label{eq:yuv2rgb}
+\end{equation}
+
+The matrix entries arise from the BT.601 luma/chroma definition:
+\[
+Y = 0.299R + 0.587G + 0.114B, \quad
+C_b = \frac{B - Y}{1.772}, \quad
+C_r = \frac{R - Y}{1.402}.
+\]
+
+Inverting these three equations (with $C_b = U/255-0.5$, $C_r = V/255-0.5$ after
+offset normalisation) recovers Eq.~\eqref{eq:yuv2rgb}.
+
+\subsection{Chroma Upsampling}
+
+NV12 layout: $Y$ plane full-resolution, interleaved $UV$ half-resolution.
+Bilinear upsampling of $U$, $V$:
+\begin{equation}
+U(x,y) = \frac{(1-\alpha)(1-\beta)\,U_{i,j} + \alpha(1-\beta)\,U_{i+1,j}
+              + (1-\alpha)\beta\,U_{i,j+1} + \alpha\beta\,U_{i+1,j+1}}{1},
+\end{equation}
+where $(i,j) = \lfloor (x,y)/2 \rfloor$ and $(\alpha,\beta) = (x,y)/2 - (i,j)$.
+
+%----------------------------------------------------------------------
+\section{TikZ Figures}
+%----------------------------------------------------------------------
+
+\subsection{Figure 1: Decoder Pipeline}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  node distance=0.5cm and 0.3cm,
+  box/.style={rectangle, draw, rounded corners, minimum width=2.2cm, minimum height=0.65cm,
+              fill=blue!10, font=\scriptsize, text centered},
+  gpubox/.style={rectangle, draw, rounded corners, minimum width=2.2cm, minimum height=0.65cm,
+              fill=green!15, font=\scriptsize, text centered},
+  arrow/.style={-{Stealth}, thick},
+  label/.style={font=\small\bfseries}
+]
+% CPU path (top row)
+\node[box] (nal)     {NAL Unit};
+\node[box, right=of nal]    (parse)  {Parser};
+\node[box, right=of parse]  (entropy){Entropy\\Decode};
+\node[box, right=of entropy](iq)     {Inv.\ Quant};
+\node[box, right=of iq]     (idct)   {IDCT};
+\node[box, right=of idct]   (mc)     {Motion\\Comp.};
+\node[box, right=of mc]     (db)     {Deblock};
+\node[box, right=of db]     (out)    {Output\\Frame};
+
+\foreach \a/\b in {nal/parse, parse/entropy, entropy/iq, iq/idct, idct/mc, mc/db, db/out}
+  \draw[arrow] (\a) -- (\b);
+
+\node[label, above=0.4cm of entropy] {CPU / Software Path};
+
+% GPU path (bottom row) -- shifted down
+\begin{scope}[yshift=-2.2cm]
+\node[box] (gnal)     {NAL Unit};
+\node[gpubox, right=of gnal]   (gparse)  {Parser};
+\node[gpubox, right=of gparse] (gentropy){NVDEC\\Entropy};
+\node[gpubox, right=of gentropy](giq)    {HW Inv.\\Quant};
+\node[gpubox, right=of giq]    (gidct)   {HW\\IDCT};
+\node[gpubox, right=of gidct]  (gmc)     {HW\\Motion};
+\node[gpubox, right=of gmc]    (gdb)     {HW\\Deblock};
+\node[gpubox, right=of gdb]    (gout)    {VRAM\\(NV12)};
+
+\foreach \a/\b in {gnal/gparse, gparse/gentropy, gentropy/giq, giq/gidct, gidct/gmc, gmc/gdb, gdb/gout}
+  \draw[arrow] (\a) -- (\b);
+
+\node[label, above=0.4cm of gentropy] {GPU / NVDEC Path (green = fixed-function)};
+\end{scope}
+\end{tikzpicture}
+\caption{H.264/HEVC decode pipeline: CPU software path (top) vs.\ NVDEC hardware path
+(bottom).  Green blocks operate in dedicated fixed-function silicon, freeing shader
+cores for post-processing.}
+\label{fig:pipeline}
+\end{figure}
+
+%----------------------------------------------------------------------
+\section*{References}
+%----------------------------------------------------------------------
+\begin{thebibliography}{9}
+
+\bibitem{h264}
+ITU-T, \textit{Advanced Video Coding for Generic Audiovisual Services},
+Recommendation H.264, 2021.
+
+\bibitem{hevc}
+ITU-T, \textit{High Efficiency Video Coding},
+Recommendation H.265, 2021.
+
+\bibitem{nvdec}
+NVIDIA Corporation, \textit{NVDEC Video Decoder API Programming Guide},
+\url{https://docs.nvidia.com/cuda/pdf/NVDEC_Application_Note.pdf}, 2023.
+
+\bibitem{richardson}
+I.~E.~G.~Richardson,
+\textit{The H.264 Advanced Video Compression Standard}, 2nd ed.,
+Wiley, 2010.
+
+\end{thebibliography}
+
+\end{document}
