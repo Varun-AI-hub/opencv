@@ -54,6 +54,83 @@ namespace cv {
 
 using namespace std;
 
+/**
+ * @brief Count how many of the N object points project to positive depth (z_c > 0)
+ *        given the rotation vector rvec and translation tvec.
+ *
+ * This is the cheirality check: a valid camera pose must have all observed 3D points
+ * in front of the camera (positive depth in the camera frame).
+ *
+ * @param objectPoints  Nx3 matrix of 3D object points (CV_32F or CV_64F).
+ * @param rvec          Rodrigues rotation vector (3x1, CV_64F).
+ * @param tvec          Translation vector (3x1, CV_64F).
+ * @param npoints       Number of correspondences.
+ * @return Number of points with z_c > 0.
+ */
+static int countPositiveDepths(const Mat& objectPoints,
+                                const Mat& rvec,
+                                const Mat& tvec,
+                                int npoints)
+{
+    Mat R;
+    Rodrigues(rvec, R);
+
+    Mat pts;
+    objectPoints.reshape(1, npoints).convertTo(pts, CV_64F);
+
+    // r3 = third row of R
+    const double r30 = R.at<double>(2, 0);
+    const double r31 = R.at<double>(2, 1);
+    const double r32 = R.at<double>(2, 2);
+    const double tz  = tvec.at<double>(2);
+
+    int positive_count = 0;
+    for (int i = 0; i < npoints; i++)
+    {
+        const double X = pts.at<double>(i, 0);
+        const double Y = pts.at<double>(i, 1);
+        const double Z = pts.at<double>(i, 2);
+        // z_c = r3 . [X,Y,Z] + tz
+        const double z_c = r30 * X + r31 * Y + r32 * Z + tz;
+        if (z_c > 0.0)
+            positive_count++;
+    }
+    return positive_count;
+}
+
+/**
+ * @brief Apply the cheirality fix to a flipped pose solution.
+ *
+ * When EPNP or an iterative solver returns a pose where most object points have
+ * negative depth (object behind camera), this function corrects the sign by applying
+ * the transformation:
+ *   R_new = diag(-1, -1, 1) * R   (negate rows 0 and 1)
+ *   t_new = -t
+ *
+ * This is the inverse of the sign-flip that occurs when EPNP's solve_for_sign()
+ * makes the wrong choice.  det(R_new) = (-1)*(-1)*(1)*det(R) = +1, so R_new in SO(3).
+ *
+ * After the fix, z_c_new = r3.X + (-tz) > 0 for typical configurations where
+ * the original wrong solution had tz < 0 (object behind camera).
+ *
+ * @param rvec  Input/output Rodrigues rotation vector (3x1, CV_64F).
+ * @param tvec  Input/output translation vector (3x1, CV_64F).
+ */
+static void applyCheiralityFix(Mat& rvec, Mat& tvec)
+{
+    Mat R;
+    Rodrigues(rvec, R);
+
+    // Apply diag(-1,-1,1) on the LEFT: negate rows 0 and 1
+    R.row(0) = -R.row(0);
+    R.row(1) = -R.row(1);
+    // Row 2 (which determines z_c) is left unchanged; only tz is negated via -tvec
+
+    tvec = -tvec;
+
+    Rodrigues(R, rvec);
+}
+
 #if !defined(NDEBUG) || defined(CV_STATIC_ANALYSIS)
 static bool isPlanarObjectPoints(InputArray _objectPoints, double threshold)
 {
@@ -964,6 +1041,41 @@ int solvePnPGeneric( InputArray _opoints, InputArray _ipoints,
     else
         CV_Error(cv::Error::StsBadArg, "The flags argument must be one of SOLVEPNP_ITERATIVE, SOLVEPNP_P3P, "
             "SOLVEPNP_EPNP, SOLVEPNP_AP3P, SOLVEPNP_IPPE, SOLVEPNP_IPPE_SQUARE or SOLVEPNP_SQPNP");
+
+    // -----------------------------------------------------------------------
+    // Cheirality post-processing (issue #8813)
+    //
+    // The EPNP and iterative solvers can return a geometrically invalid pose
+    // where most object points have negative depth (object behind camera).
+    // This happens when EPNP's solve_for_sign() checks only the first
+    // correspondence's z-coordinate and makes the wrong sign choice.
+    //
+    // Post-process each solution: if more than half the points have negative
+    // depth, apply the sign-flip remedy:
+    //   R_new = diag(-1,-1,1) * R   (negate rows 0 and 1; det unchanged)
+    //   t_new = -t
+    // This directly inverts the EPNP sign-flip error while keeping R in SO(3).
+    // -----------------------------------------------------------------------
+    if (flags == SOLVEPNP_EPNP || flags == SOLVEPNP_ITERATIVE)
+    {
+        for (size_t si = 0; si < vec_rvecs.size(); si++)
+        {
+            Mat r64, t64;
+            vec_rvecs[si].convertTo(r64, CV_64F);
+            vec_tvecs[si].convertTo(t64, CV_64F);
+
+            int pos = countPositiveDepths(opoints, r64, t64, npoints);
+            if (pos < npoints - pos)
+            {
+                // Majority of points behind camera: apply cheirality fix
+                CV_LOG_DEBUG(NULL, "solvePnPGeneric(): cheirality check failed for solution "
+                    << si << " (flags=" << flags << "), applying sign-flip remedy.");
+                applyCheiralityFix(r64, t64);
+                r64.convertTo(vec_rvecs[si], vec_rvecs[si].depth());
+                t64.convertTo(vec_tvecs[si], vec_tvecs[si].depth());
+            }
+        }
+    }
 
     CV_Assert(vec_rvecs.size() == vec_tvecs.size());
 

@@ -2309,4 +2309,143 @@ TEST(AP3P, ctheta1p_nan_23607)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Test for issue #8813: cheirality post-processing in solvePnP
+//
+// Verifies that solvePnP with SOLVEPNP_EPNP and SOLVEPNP_ITERATIVE does NOT
+// return a flipped pose (object behind camera) for a well-conditioned input.
+//
+// The test constructs a known camera pose, projects 3D points to get perfect
+// 2D correspondences, then calls solvePnP and checks that ALL projected
+// depths are positive (cheirality constraint satisfied).
+// ---------------------------------------------------------------------------
+
+// Helper: count how many object points have positive depth given (rvec, tvec)
+static int countPositiveDepths_test(const std::vector<cv::Point3d>& pts3d,
+                                    const cv::Mat& rvec, const cv::Mat& tvec)
+{
+    cv::Mat R;
+    cv::Rodrigues(rvec, R);
+    int pos = 0;
+    for (const auto& p : pts3d)
+    {
+        double zc = R.at<double>(2,0)*p.x + R.at<double>(2,1)*p.y
+                  + R.at<double>(2,2)*p.z + tvec.at<double>(2);
+        if (zc > 0.0)
+            pos++;
+    }
+    return pos;
+}
+
+TEST(SolvePnP, CheiralityFix_EPNP_8813)
+{
+    // Camera intrinsics (640x480 sensor, 800px focal length)
+    const double fx = 800.0, fy = 800.0, cx = 320.0, cy = 240.0;
+    cv::Mat K = (cv::Mat_<double>(3,3) <<
+        fx, 0, cx,
+        0, fy, cy,
+        0, 0,  1);
+    cv::Mat distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
+
+    // Ground-truth pose: camera looks along +Z, object is 5 units in front
+    // True rvec: 15-degree rotation about X axis
+    cv::Mat true_rvec = (cv::Mat_<double>(3,1) << CV_PI/12.0, 0.0, 0.0);
+    cv::Mat true_tvec = (cv::Mat_<double>(3,1) << 0.1, -0.2, 5.0);
+
+    // 3D object points: a rectangular pattern in the XY plane
+    std::vector<cv::Point3d> objectPoints = {
+        { -1.0,  -1.0,  0.0 },
+        {  1.0,  -1.0,  0.0 },
+        {  1.0,   1.0,  0.0 },
+        { -1.0,   1.0,  0.0 },
+        {  0.0,   0.0,  0.0 },
+        { -0.5,  -0.5,  0.5 },
+        {  0.5,  -0.5,  0.5 },
+        {  0.5,   0.5,  0.5 },
+        { -0.5,   0.5,  0.5 },
+        {  0.0,   0.0,  1.0 },
+    };
+
+    // Project to get perfect 2D correspondences
+    std::vector<cv::Point2d> imagePoints;
+    cv::projectPoints(objectPoints, true_rvec, true_tvec, K, distCoeffs, imagePoints);
+
+    // --- Test SOLVEPNP_EPNP ---
+    {
+        cv::Mat rvec_out, tvec_out;
+        bool ok = cv::solvePnP(objectPoints, imagePoints, K, distCoeffs,
+                               rvec_out, tvec_out, false, cv::SOLVEPNP_EPNP);
+        EXPECT_TRUE(ok) << "EPNP: solvePnP returned false";
+
+        // Cheirality check: ALL points must have positive depth
+        int pos = countPositiveDepths_test(objectPoints, rvec_out, tvec_out);
+        EXPECT_EQ(pos, (int)objectPoints.size())
+            << "EPNP: cheirality violated - " << (objectPoints.size() - pos)
+            << " points have negative depth (issue #8813)";
+
+        // Pose accuracy check
+        double rvec_err = cv::norm(true_rvec, rvec_out, cv::NORM_L2);
+        double tvec_err = cv::norm(true_tvec, tvec_out, cv::NORM_L2);
+        EXPECT_LT(rvec_err, 0.05)
+            << "EPNP: rotation error too large after cheirality fix: " << rvec_err;
+        EXPECT_LT(tvec_err, 0.5)
+            << "EPNP: translation error too large after cheirality fix: " << tvec_err;
+    }
+
+    // --- Test SOLVEPNP_ITERATIVE ---
+    {
+        cv::Mat rvec_out, tvec_out;
+        bool ok = cv::solvePnP(objectPoints, imagePoints, K, distCoeffs,
+                               rvec_out, tvec_out, false, cv::SOLVEPNP_ITERATIVE);
+        EXPECT_TRUE(ok) << "ITERATIVE: solvePnP returned false";
+
+        int pos = countPositiveDepths_test(objectPoints, rvec_out, tvec_out);
+        EXPECT_EQ(pos, (int)objectPoints.size())
+            << "ITERATIVE: cheirality violated - " << (objectPoints.size() - pos)
+            << " points have negative depth (issue #8813)";
+    }
+}
+
+TEST(SolvePnP, CheiralityFix_EPNP_FlippedInput_8813)
+{
+    // This test deliberately constructs a scenario where the "naive" EPNP
+    // would likely return the flipped solution by placing the first
+    // correspondence at an outlier position.
+    const double fx = 600.0, fy = 600.0, cx = 400.0, cy = 300.0;
+    cv::Mat K = (cv::Mat_<double>(3,3) <<
+        fx,  0, cx,
+        0,  fy, cy,
+        0,   0,  1);
+    cv::Mat distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
+
+    // Ground-truth pose: slight rotation, translation along z
+    cv::Mat true_rvec = (cv::Mat_<double>(3,1) << 0.1, 0.2, 0.05);
+    cv::Mat true_tvec = (cv::Mat_<double>(3,1) << -0.3, 0.4, 8.0);
+
+    // Object points: planar grid
+    std::vector<cv::Point3d> objectPoints;
+    for (int r = -2; r <= 2; r++)
+        for (int c = -2; c <= 2; c++)
+            objectPoints.push_back(cv::Point3d(c * 0.5, r * 0.5, 0.0));
+
+    // Project
+    std::vector<cv::Point2d> imagePoints;
+    cv::projectPoints(objectPoints, true_rvec, true_tvec, K, distCoeffs, imagePoints);
+
+    cv::Mat rvec_out, tvec_out;
+    bool ok = cv::solvePnP(objectPoints, imagePoints, K, distCoeffs,
+                           rvec_out, tvec_out, false, cv::SOLVEPNP_EPNP);
+    EXPECT_TRUE(ok);
+
+    // After the cheirality fix, all points must be in front of the camera
+    int pos = countPositiveDepths_test(objectPoints, rvec_out, tvec_out);
+    EXPECT_EQ(pos, (int)objectPoints.size())
+        << "EPNP (grid test): cheirality violated - "
+        << (objectPoints.size() - pos) << " points have negative depth";
+
+    // And the translation z should be positive
+    EXPECT_GT(tvec_out.at<double>(2), 0.0)
+        << "EPNP (grid test): t_z should be positive, got " << tvec_out.at<double>(2);
+}
+
 }} // namespace
