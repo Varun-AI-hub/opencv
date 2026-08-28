@@ -1,0 +1,328 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+
+\geometry{margin=1in}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+
+\title{\textbf{Connected Components Labeling:\\
+Union-Find with Path Compression and Rank Union}\\
+\large Mathematical Documentation for OpenCV Issue \#17902}
+\author{OpenCV Fix Branch: \texttt{fix/issue-17902-connectedcomponents}}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%-----------------------------------------------------------------------
+\section{Introduction}
+
+Connected component labeling (CCL) is a fundamental operation in image
+processing and computer vision.  Given a binary image, the algorithm
+partitions the foreground pixels into maximal sets of mutually reachable
+pixels under a chosen pixel-adjacency relation.
+
+This document derives the full mathematics behind the two-pass
+Union-Find algorithm used in OpenCV's \texttt{connectedComponents()},
+explains the off-by-one bug in background-component counting fixed
+in issue~\#17902, and provides complexity analysis.
+
+%-----------------------------------------------------------------------
+\section{Graph-Theoretic Definitions}
+
+\begin{definition}[Binary Image]
+A binary image is a function $I : \mathbb{Z}^2 \to \{0, 1\}$, where
+$I(p) = 1$ denotes a \emph{foreground} pixel and $I(p) = 0$ denotes
+a \emph{background} pixel.
+\end{definition}
+
+\begin{definition}[Pixel Adjacency]
+Two pixels $p = (x_1, y_1)$ and $q = (x_2, y_2)$ are:
+\begin{itemize}
+  \item \textbf{4-connected} if $|x_1 - x_2| + |y_1 - y_2| = 1$
+        (north, south, east, west neighbours only), and
+  \item \textbf{8-connected} if $\max(|x_1 - x_2|, |y_1 - y_2|) = 1$
+        (all 8 neighbours including diagonals).
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Connected Component]
+A \emph{connected component} $C \subseteq \{p \in \mathbb{Z}^2 : I(p)=1\}$
+is a maximal set such that for every pair $p, q \in C$ there exists a
+path $p = p_0, p_1, \ldots, p_k = q$ of foreground pixels where
+consecutive pixels are adjacent.
+\end{definition}
+
+The labeling problem asks: assign to every foreground pixel a label
+$\ell(p) \in \{1, 2, \ldots, K\}$ such that $\ell(p) = \ell(q)$ iff
+$p$ and $q$ belong to the same connected component.
+
+%-----------------------------------------------------------------------
+\section{Union-Find Data Structure}
+
+\subsection{Representation}
+
+We maintain two integer arrays of size $N$ (number of pixels):
+\begin{itemize}
+  \item \texttt{parent}$[i]$: parent of node $i$ in the forest.
+        Initially \texttt{parent}$[i] = i$ (every node is its own root).
+  \item \texttt{rank}$[i]$: upper bound on the height of the subtree
+        rooted at $i$. Initially \texttt{rank}$[i] = 0$.
+\end{itemize}
+
+\subsection{Find with Path Compression}
+
+\begin{definition}[Path Compression]
+\[
+  \textsc{Find}(x) =
+  \begin{cases}
+    x & \text{if } \texttt{parent}[x] = x \\
+    \textsc{Find}(\texttt{parent}[x]) & \text{otherwise, and then set}\\
+    & \texttt{parent}[x] \leftarrow \textsc{Find}(\texttt{parent}[x])
+  \end{cases}
+\]
+\end{definition}
+
+Path compression flattens the tree on every lookup: after calling
+$\textsc{Find}(x)$, all nodes on the path from $x$ to the root point
+directly to the root.
+
+\subsection{Union by Rank}
+
+\begin{definition}[Union by Rank]
+\begin{align*}
+  &r_x \leftarrow \textsc{Find}(x), \quad r_y \leftarrow \textsc{Find}(y) \\
+  &\text{if } r_x = r_y: \text{ already in same component, return} \\
+  &\text{if } \texttt{rank}[r_x] < \texttt{rank}[r_y]: \texttt{parent}[r_x] \leftarrow r_y \\
+  &\text{if } \texttt{rank}[r_x] > \texttt{rank}[r_y]: \texttt{parent}[r_y] \leftarrow r_x \\
+  &\text{if } \texttt{rank}[r_x] = \texttt{rank}[r_y]: \texttt{parent}[r_y] \leftarrow r_x,\;
+    \texttt{rank}[r_x] \mathrel{+}= 1
+\end{align*}
+\end{definition}
+
+\begin{theorem}[Amortized Complexity]
+With both path compression and union by rank, any sequence of $m$
+\textsc{Find} and \textsc{Union} operations on $n$ elements runs in
+$O(m \cdot \alpha(n))$ time, where $\alpha$ is the inverse Ackermann
+function.
+\end{theorem}
+
+\noindent The inverse Ackermann function $\alpha(n) \leq 4$ for any
+practical $n$ (even $n = 2^{65536}$), so the amortized cost per
+operation is effectively constant.
+
+%-----------------------------------------------------------------------
+\section{Two-Pass Labeling (Rosenfeld \& Pfaltz)}
+
+\subsection{Pass 1: Provisional Labeling and Equivalence Recording}
+
+Scan pixels in raster order (row by row, left to right).  For each
+foreground pixel $p = (x, y)$:
+\begin{enumerate}
+  \item Examine previously-visited neighbours (in 4-connectivity: north
+        $= (x, y-1)$ and west $= (x-1, y)$; in 8-connectivity: add
+        north-west $= (x-1, y-1)$ and north-east $= (x+1, y-1)$).
+  \item Let $\mathcal{L}$ be the set of labels found among foreground
+        neighbours.
+  \item If $\mathcal{L} = \emptyset$: assign a fresh label
+        $\ell(p) \leftarrow \textsc{NewLabel}()$.
+  \item If $|\mathcal{L}| = 1$: assign $\ell(p) \leftarrow \min \mathcal{L}$.
+  \item If $|\mathcal{L}| > 1$: assign $\ell(p) \leftarrow \min \mathcal{L}$
+        and call $\textsc{Union}(\ell_i, \ell_j)$ for all pairs
+        $\ell_i, \ell_j \in \mathcal{L}$.
+\end{enumerate}
+
+\subsection{Pass 2: Label Resolution}
+
+For each pixel $p$:
+\[
+  \ell_{\text{final}}(p) =
+  \begin{cases}
+    \textsc{Find}(\ell(p)) & \text{if } I(p) = 1 \\
+    0 & \text{if } I(p) = 0 \text{ (background)}
+  \end{cases}
+\]
+
+The number of connected components is:
+\[
+  K = \bigl|\{\textsc{Find}(L) : L \text{ is a foreground label}\}\bigr|
+\]
+
+%-----------------------------------------------------------------------
+\section{The Bug: Off-by-One in Background Counting}
+
+\subsection{Root Cause}
+
+In OpenCV's original \texttt{connectedComponents()} implementation, the
+returned label count was computed as:
+\[
+  \text{retval} = \max_{p} \ell_{\text{final}}(p) + 1
+\]
+This counts label~0 (background) as a component.  For an all-white
+image of size $W \times H$, there is exactly one foreground component
+(label~1) and zero background pixels.  The correct answer is $K = 1$,
+but the function returned $2$.
+
+\subsection{General Formula}
+
+Let $N_{\text{fg}}$ = number of foreground pixels.  The correct
+connected-component count is:
+\[
+  K =
+  \begin{cases}
+    0 & \text{if } N_{\text{fg}} = 0 \\
+    \max_{p \,:\, I(p)=1} \ell_{\text{final}}(p) & \text{otherwise}
+  \end{cases}
+\]
+
+For an all-foreground $W \times H$ image with 4-connectivity, $K = 1$
+and the single label assigned is~1; therefore $\max = 1$, which is
+correct.
+
+\subsection{Fix}
+
+Detect when the background label~0 occupies zero pixels and subtract
+that phantom component from the count:
+\begin{align*}
+  \text{retval\_raw} &= \max_{p} \ell_{\text{final}}(p) + 1 \\
+  \text{bg\_pixels} &= |\{p : I(p) = 0\}| \\
+  \text{retval} &= \text{retval\_raw} - \mathbf{1}[\text{bg\_pixels} = 0]
+\end{align*}
+
+%-----------------------------------------------------------------------
+\section{Complexity Analysis}
+
+Let the image have width $W$ and height $H$, with $N = WH$ pixels.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Operation} & \textbf{Time} & \textbf{Space} \\
+\hline
+Pass 1 (scan + union-find) & $O(N \alpha(N))$ & $O(N)$ \\
+Pass 2 (resolve labels)    & $O(N \alpha(N))$ & $O(1)$ extra \\
+\hline
+\textbf{Total (Union-Find)} & $O(N \alpha(N))$ & $O(N)$ \\
+\hline
+Naive flood-fill            & $O(N \cdot \min(W,H))$ & $O(N)$ \\
+\hline
+\end{tabular}
+\caption{Complexity comparison.  $\alpha(N) \leq 4$ in practice.}
+\end{table}
+
+For a megapixel image ($N = 10^6$), the Union-Find approach performs
+roughly $4 \times 10^6$ operations vs.\ up to $10^9$ for naive
+flood-fill.
+
+%-----------------------------------------------------------------------
+\section{TikZ Figures}
+
+\subsection{Figure 1: 4$\times$4 All-White Grid — Union-Find in Action}
+
+\begin{center}
+\begin{tikzpicture}[
+  cell/.style={draw, minimum size=0.9cm, fill=white, font=\small},
+  lbl/.style={font=\footnotesize\bfseries, color=blue!70!black},
+  scale=1]
+
+% Grid — Pass 1 provisional labels
+\foreach \col/\x in {0/0,1/1,2/2,3/3} {
+  \foreach \row/\y in {0/0,1/1,2/2,3/3} {
+    \pgfmathtruncatemacro{\lab}{\col + \row*4 + 1}
+    \node[cell] at (\col, -\row) {\lab};
+  }
+}
+\node[above] at (1.5,0.6) {\textbf{Pass 1: provisional labels 1--16}};
+
+% After union arrows (horizontal)
+\foreach \row in {0,1,2,3} {
+  \foreach \col in {0,1,2} {
+    \pgfmathtruncatemacro{\src}{\col + \row*4 + 1}
+    \pgfmathtruncatemacro{\tgt}{\col + \row*4 + 2}
+    \draw[->, thick, red!60] (\col+0.4, -\row) -- (\col+0.6, -\row);
+  }
+}
+% After union arrows (vertical)
+\foreach \row in {0,1,2} {
+  \foreach \col in {0,1,2,3} {
+    \draw[->, thick, red!60] (\col, -\row-0.4) -- (\col, -\row-0.6);
+  }
+}
+
+% Pass 2 resolved labels (below grid)
+\node[below] at (1.5,-3.8) {\textbf{Pass 2: all labels resolve to 1 (single CC)}};
+\foreach \col in {0,1,2,3} {
+  \foreach \row in {0,1,2,3} {
+    \node[cell, fill=green!20] at (\col+5.5, -\row) {1};
+  }
+}
+\node[above] at (7,-0.3+0.6) {\textbf{Pass 2: all pixels $\to$ label 1}};
+\end{tikzpicture}
+\end{center}
+
+\subsection{Figure 2: Path Compression in Union-Find Tree}
+
+\begin{center}
+\begin{tikzpicture}[
+  node distance=1.1cm,
+  nd/.style={circle, draw, minimum size=0.7cm, font=\small}]
+
+% Before compression: chain 5->4->3->2->1
+\node[nd] (r)  at (0,0)    {1};
+\node[nd] (n2) at (0,-1.1) {2};
+\node[nd] (n3) at (0,-2.2) {3};
+\node[nd] (n4) at (0,-3.3) {4};
+\node[nd] (n5) at (0,-4.4) {5};
+\draw[->] (n5)--(n4); \draw[->] (n4)--(n3);
+\draw[->] (n3)--(n2); \draw[->] (n2)--(r);
+\node[above] at (0,0.5) {\textbf{Before Find(5)}};
+
+% After compression: all point directly to root
+\node[nd] (r2)  at (5,0)    {1};
+\node[nd] (a2)  at (3.5,-1.5) {2};
+\node[nd] (a3)  at (4.5,-1.5) {3};
+\node[nd] (a4)  at (5.5,-1.5) {4};
+\node[nd] (a5)  at (6.5,-1.5) {5};
+\draw[->] (a2)--(r2); \draw[->] (a3)--(r2);
+\draw[->] (a4)--(r2); \draw[->] (a5)--(r2);
+\node[above] at (5,0.5) {\textbf{After Find(5): path compressed}};
+
+\draw[->, very thick, dashed, blue!60] (1.2,-2.2) -- (3.5,-0.3)
+  node[midway, above, sloped, font=\footnotesize]{path compression};
+\end{tikzpicture}
+\end{center}
+
+%-----------------------------------------------------------------------
+\section{References}
+
+\begin{enumerate}
+  \item A.\ Rosenfeld and J.\ L.\ Pfaltz.
+        ``Sequential operations in digital picture processing.''
+        \emph{Journal of the ACM}, 13(4):471--494, 1966.
+  \item R.\ E.\ Tarjan.
+        ``Efficiency of a good but not linear set union algorithm.''
+        \emph{Journal of the ACM}, 22(2):215--225, 1975.
+  \item K.\ Wu, E.\ Otoo, and K.\ Suzuki.
+        ``Optimized connected-component labeling with an application to
+        grain detection.''
+        \emph{IEEE Transactions on Image Processing}, 18(2):374--384, 2009.
+  \item OpenCV Documentation: \texttt{connectedComponents()}.
+        \url{https://docs.opencv.org/4.x/d3/dc0/group__imgproc__shape.html}
+\end{enumerate}
+
+\end{document}
