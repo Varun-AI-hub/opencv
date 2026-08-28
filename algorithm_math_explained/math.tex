@@ -1,0 +1,299 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+
+\geometry{margin=1in}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\lstset{basicstyle=\ttfamily\small, frame=single, language=Python}
+
+\title{\textbf{Video Container Metadata vs.\ Actual Decodable Frames:\\
+The \texttt{CAP\_PROP\_FRAME\_COUNT} Reliability Problem}\\
+\large Mathematical Documentation for OpenCV Issue \#29722}
+\author{OpenCV Fix Branch: \texttt{fix/issue-29722-videocapture-framecount}}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%-----------------------------------------------------------------------
+\section{Introduction}
+
+\texttt{VideoCapture::get(CAP\_PROP\_FRAME\_COUNT)} queries the video
+container's header to return the total number of frames.  In many
+real-world files this value is unreliable --- it can exceed, equal, or
+even be less than the number of frames that can actually be decoded.
+Issue \#29722 documents crashes and infinite loops that arise when user
+code trusts this count for loop termination.
+
+This document explains the container-format mathematics behind the
+problem and proves that event-driven loop termination (via
+\texttt{cap.read()}) is the only mathematically correct approach.
+
+%-----------------------------------------------------------------------
+\section{Video Container Architecture}
+
+\subsection{Logical Structure}
+
+A video container file is partitioned into:
+\begin{enumerate}
+  \item \textbf{Index / Header} --- metadata: duration, frame count,
+        bitrate, codec parameters.  Readable without decoding.
+  \item \textbf{Media Streams} --- interleaved audio and video packets.
+  \item \textbf{Codec Data} --- compressed frame payloads.
+\end{enumerate}
+
+\subsection{Frame Count Stored in the Header}
+
+For MP4/ISOBMFF containers, the relevant atoms are:
+\begin{itemize}
+  \item \texttt{moov} (Movie Box) $\supset$ \texttt{trak} (Track Box)
+        $\supset$ \texttt{tkhd} (Track Header Box) which stores
+        \texttt{duration} in \emph{movie time-scale} units.
+  \item \texttt{stts} (Sample-to-Time box): maps each sample group to
+        its duration, from which frame count is derived.
+\end{itemize}
+
+The header frame count is:
+\[
+  N_{\text{header}} = \bigl\lfloor D \times \text{fps} \bigr\rfloor
+\]
+where $D$ is the duration in seconds and fps is the nominal frame rate.
+
+\begin{remark}
+$N_{\text{header}}$ is written by the encoder at file creation time.
+If the encoder crashes, the write is incomplete, or the file is
+subsequently truncated, $N_{\text{header}}$ will be wrong.
+\end{remark}
+
+%-----------------------------------------------------------------------
+\section{Frame Count Reliability Problems}
+
+\subsection{Case 1: Truncated File}
+
+Let a file be truncated after byte offset $B_t < B_{\text{total}}$.
+The header (at offset 0) is intact and claims $N_{\text{header}}$
+frames, but only $N_{\text{actual}} < N_{\text{header}}$ frames are
+physically present:
+\[
+  N_{\text{actual}} = \max \bigl\{ k : \text{packets for frames } 0 \ldots k-1
+                                      \text{ lie within } [0, B_t] \bigr\}
+\]
+
+\subsection{Case 2: Variable Frame Rate (VFR)}
+
+In VFR streams each frame has a \emph{Presentation Timestamp} (PTS):
+\[
+  \text{PTS}_k \in \frac{1}{\text{time\_base}} \mathbb{Z},
+  \qquad \text{time\_base} = \frac{p}{q}\;\text{seconds}
+\]
+
+Frame $k$ occupies the interval $[\text{PTS}_k, \text{PTS}_{k+1})$.
+Frame durations $\Delta_k = \text{PTS}_{k+1} - \text{PTS}_k$ are
+non-constant.  The nominal fps used to compute $N_{\text{header}}$ is
+typically the \emph{average} or \emph{declared} fps, which may not
+match any actual inter-frame gap.  Hence:
+\[
+  N_{\text{actual}} = \sum_{k=0}^{\infty} \mathbf{1}[\text{frame } k
+                        \text{ decoded successfully}]
+  \;\neq\; N_{\text{header}}
+\]
+
+Determining $N_{\text{actual}}$ requires decoding \emph{every frame},
+which is an $O(N_{\text{actual}})$ operation with no shortcut.
+
+\subsection{Case 3: Broken Encoder}
+
+Some encoders write the wrong value in \texttt{stts} or leave the
+\texttt{duration} field as 0 (updating it only on clean close).  In
+such cases $N_{\text{header}} = 0$ while $N_{\text{actual}} > 0$, or
+vice versa.
+
+\subsection{Summary Inequality}
+
+In general:
+\[
+  N_{\text{actual}} \leq N_{\text{header}}
+  \quad \text{(but can violate this for VFR)}
+\]
+
+Only the following is mathematically guaranteed:
+\[
+  \text{cap.read()} = \text{true} \iff \exists \text{ a decodable frame at current position}
+\]
+
+%-----------------------------------------------------------------------
+\section{Presentation Timestamps: Formal Definition}
+
+\begin{definition}[Time Base]
+The \emph{time base} of a stream is a rational number
+$\tau = p/q$ seconds (typically $\tau = 1/90000$ for MPEG streams).
+All timestamps are integers in units of $\tau$.
+\end{definition}
+
+\begin{definition}[PTS and DTS]
+Each frame packet carries:
+\begin{itemize}
+  \item $\text{PTS}_k$ (Presentation Timestamp): when to display frame $k$.
+  \item $\text{DTS}_k$ (Decode Timestamp): when to feed frame $k$ to decoder.
+\end{itemize}
+For B-frame encodings, $\text{DTS}_k \leq \text{PTS}_k$ with strict
+inequality for out-of-order B-frames.
+\end{definition}
+
+\begin{definition}[Stream Duration in Frames]
+\[
+  D_{\text{stream}} = \text{PTS}_{\text{last}} + \Delta_{\text{last}} - \text{PTS}_0
+  \quad [\text{in time\_base units}]
+\]
+\[
+  N_{\text{header}} = \biggl\lfloor D_{\text{stream}} \times \frac{\text{fps\_declared}}{\tau^{-1}} \biggr\rfloor
+\]
+\end{definition}
+
+%-----------------------------------------------------------------------
+\section{Correct Loop Pattern}
+
+\subsection{Buggy Pattern (Index-Based)}
+
+\begin{lstlisting}
+cap = cv2.VideoCapture("file.mp4")
+n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # unreliable!
+for i in range(n):
+    ret, frame = cap.read()
+    process(frame)  # crashes if ret=False and frame=None
+\end{lstlisting}
+
+\textbf{Failure mode:} if $N_{\text{actual}} < N_{\text{header}}$, the
+loop runs past the last decodable frame.  \texttt{cap.read()} returns
+\texttt{(False, None)} and \texttt{process(None)} raises an exception.
+
+\subsection{Correct Pattern (Event-Driven)}
+
+\begin{lstlisting}
+cap = cv2.VideoCapture("file.mp4")
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    process(frame)  # guaranteed frame is valid here
+\end{lstlisting}
+
+\textbf{Mathematical guarantee:} \texttt{cap.read()} returns
+\texttt{False} if and only if the stream is exhausted or a
+non-recoverable decode error occurs.  The loop body executes exactly
+$N_{\text{actual}}$ times.
+
+%-----------------------------------------------------------------------
+\section{TikZ Figures}
+
+\subsection{Figure 1: Frame Timeline — Header Claim vs.\ Reality}
+
+\begin{center}
+\begin{tikzpicture}[scale=1]
+% Timeline axis
+\draw[->] (0,0) -- (12,0) node[right]{\small frame index};
+
+% Header claims 0–9 (10 frames)
+\foreach \i in {0,...,9} {
+  \draw[blue!60, fill=blue!20] (\i*1.1, 0.1) rectangle (\i*1.1+0.9, 0.9)
+    node[midway, font=\tiny]{\i};
+}
+\node[blue!70!black, above] at (5.5, 1.0) {\textbf{$N_{\text{header}} = 10$ (from container index)}};
+
+% Actual decodable: only 0–5
+\foreach \i in {0,...,5} {
+  \draw[green!70!black, fill=green!20] (\i*1.1, -1.0) rectangle (\i*1.1+0.9, -0.1)
+    node[midway, font=\tiny]{\i};
+}
+% Missing frames 6–9 shown in red
+\foreach \i in {6,...,9} {
+  \draw[red!80, fill=red!20] (\i*1.1, -1.0) rectangle (\i*1.1+0.9, -0.1)
+    node[midway, font=\tiny, red]{?};
+}
+\node[green!70!black, below] at (2.75, -1.1) {\textbf{$N_{\text{actual}} = 6$}};
+\node[red, below] at (8.25, -1.1) {\textbf{truncated / missing}};
+
+\draw[dashed, thick, red] (6*1.1, -1.2) -- (6*1.1, 1.1)
+  node[above, font=\small, red]{truncation point};
+\end{tikzpicture}
+\end{center}
+
+\subsection{Figure 2: Loop Termination Flowcharts}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners, text centered,
+              minimum width=3cm, minimum height=0.7cm, font=\small},
+  dec/.style={draw, diamond, text centered, font=\small,
+              minimum width=2.5cm, minimum height=0.7cm},
+  arr/.style={->, thick}]
+
+% Buggy loop
+\node[box, fill=red!20]  (bi) at (0,0)     {i = 0};
+\node[dec, fill=red!10]  (bc) at (0,-1.5)  {i < N\_header?};
+\node[box, fill=red!20]  (br) at (0,-3.0)  {cap.read()};
+\node[dec, fill=red!10]  (bnr) at (0,-4.5) {ret?};
+\node[box, fill=red!40]  (bcrash) at (2.5,-5.8) {CRASH on None};
+\node[box, fill=red!20]  (bproc) at (-2,-5.8) {process(frame)};
+\node[box]               (bend)  at (0,-7.0) {done};
+
+\draw[arr] (bi)   -- (bc);
+\draw[arr] (bc)   -- node[right]{\tiny yes} (br);
+\draw[arr] (bc)   -- ++(3,0) |- node[near start, above]{\tiny no} (bend);
+\draw[arr] (br)   -- (bnr);
+\draw[arr] (bnr)  -- node[right]{\tiny no}  (bcrash);
+\draw[arr] (bnr)  -- node[left]{\tiny yes} (bproc);
+\draw[arr] (bproc) -- ++(-1.5, 0) |- ++(0, 5.2) -- (bc);
+\node[above] at (0, 0.5) {\textcolor{red}{\textbf{Buggy (index-based)}}};
+
+% Correct loop
+\begin{scope}[xshift=7.5cm]
+\node[box, fill=green!20] (gi) at (0,0)     {start};
+\node[box, fill=green!20] (gr) at (0,-1.5)  {cap.read()};
+\node[dec, fill=green!10] (gnr) at (0,-3.0) {ret?};
+\node[box, fill=green!20] (gproc) at (0,-4.5) {process(frame)};
+\node[box]                (gend) at (3,-3.0) {done};
+
+\draw[arr] (gi)   -- (gr);
+\draw[arr] (gr)   -- (gnr);
+\draw[arr] (gnr)  -- node[right]{\tiny no}  (gend);
+\draw[arr] (gnr)  -- node[left]{\tiny yes} (gproc);
+\draw[arr] (gproc) -- ++(-1.5,0) |- ++(0,2.5) -- (gr);
+\node[above] at (0, 0.5) {\textcolor{green!70!black}{\textbf{Correct (event-driven)}}};
+\end{scope}
+
+\end{tikzpicture}
+\end{center}
+
+%-----------------------------------------------------------------------
+\section{References}
+
+\begin{enumerate}
+  \item ISO/IEC 14496-12:2015 --- \emph{Information technology ---
+        Coding of audio-visual objects --- Part~12: ISO base media
+        file format}.
+  \item FFmpeg documentation: \texttt{AVFormatContext.nb\_streams},
+        \texttt{AVStream.nb\_frames}.
+        \url{https://ffmpeg.org/doxygen/trunk/structAVFormatContext.html}
+  \item Microsoft RIFF / AVI file format specification.
+        \url{https://docs.microsoft.com/en-us/windows/win32/directshow/avi-riff-file-reference}
+  \item OpenCV Documentation: \texttt{VideoCapture}.
+        \url{https://docs.opencv.org/4.x/d8/dfe/classcv_1_1VideoCapture.html}
+\end{enumerate}
+
+\end{document}
