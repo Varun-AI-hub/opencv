@@ -1,0 +1,67 @@
+\documentclass{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, decorations.pathreplacing, fit, backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  slot32/.style={rectangle, minimum width=1.5cm, minimum height=0.9cm,
+                 draw=black, fill=blue!30, font=\footnotesize\bfseries, text centered},
+  slot16/.style={rectangle, minimum width=0.75cm, minimum height=0.9cm,
+                 draw=black, fill=orange!40, font=\footnotesize\bfseries, text centered},
+  arrow/.style={-{Stealth[length=6pt]}, thick},
+  warn/.style={font=\small\bfseries, text=red!70!black},
+  ok/.style={font=\small\bfseries, text=green!50!black},
+  label/.style={font=\footnotesize},
+]
+
+% ===== Title =====
+\node[font=\large\bfseries] (title) at (3.75, 1.8)
+  {VSX 128-bit Register: Two Interpretations};
+
+% ===== Top row: 4 × uint32 =====
+\node[font=\small\bfseries] (label32) at (-1.2, 0.45) {4 × uint32:};
+
+\node[slot32] (a0) at (0.75, 0.45)  {u32\,[0]};
+\node[slot32] (a1) at (2.25, 0.45)  {u32\,[1]};
+\node[slot32] (a2) at (3.75, 0.45)  {u32\,[2]};
+\node[slot32] (a3) at (5.25, 0.45)  {u32\,[3]};
+
+\node[label, right=0.3cm of a3] {128 bits total};
+
+% ===== Bottom row: 8 × uint16 =====
+\node[font=\small\bfseries] (label16) at (-1.2, -1.05) {8 × uint16:};
+
+\node[slot16] (b0) at (0.375, -1.05) {u16\,[0]};
+\node[slot16] (b1) at (1.125, -1.05) {u16\,[1]};
+\node[slot16] (b2) at (1.875, -1.05) {u16\,[2]};
+\node[slot16] (b3) at (2.625, -1.05) {u16\,[3]};
+\node[slot16] (b4) at (3.375, -1.05) {u16\,[4]};
+\node[slot16] (b5) at (4.125, -1.05) {u16\,[5]};
+\node[slot16] (b6) at (4.875, -1.05) {u16\,[6]};
+\node[slot16] (b7) at (5.625, -1.05) {u16\,[7]};
+
+\node[label, right=0.3cm of b7] {128 bits total};
+
+% ===== BEFORE: implicit reinterpret (warning) =====
+\draw[arrow, red!60, dashed] (3.75, 0.0) --
+  node[midway, left=0.4cm, warn] {BEFORE: implicit cast}
+  node[midway, right=0.2cm, warn] {\large\textbf{⚠} deprecated}
+  (3.75, -0.6);
+
+% ===== AFTER: explicit reinterpret =====
+\draw[arrow, green!50!black, thick] (3.75, -1.5) --
+  node[midway, right=0.2cm, ok] {\texttt{vsx\_reinterpret\_as<v8u16>(val)}}
+  (3.75, -2.2);
+
+\node[rectangle, rounded corners=3pt, fill=green!20, draw=green!50!black,
+      minimum width=5cm, minimum height=0.7cm, font=\small]
+  at (3.75, -2.6) {Explicit reinterpret — no compiler warning};
+
+% ===== Caption =====
+\node[font=\footnotesize\itshape, text width=9cm, align=center]
+  at (3.75, -3.6)
+  {Same 128 bits, two valid layouts. The old code cast implicitly (deprecated in GCC 10+
+   on ppc64le). The fix uses \texttt{vsx\_reinterpret\_as<>} to make the intent explicit.};
+
+\end{tikzpicture}
+\end{document}
