@@ -1,0 +1,306 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+\pgfplotsset{compat=1.18}
+\geometry{margin=1in}
+
+\title{\textbf{Boolean Tensors in Neural Networks}\\
+\large ONNX Data Types, Bitwise Operations, and Type-Safe Mapping\\
+\normalsize OpenCV Fix: Issue 19366 --- DNN Bool Tensor Support}
+\author{OpenCV DNN Module}
+\date{\today}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+Boolean tensors are a fundamental data type in modern neural network frameworks. The ONNX (Open Neural Network Exchange) specification defines a \texttt{bool} data type for tensors, which is used as output from comparison operators and as input to logical and conditional operators. OpenCV's DNN module failed to handle this type correctly, causing crashes when loading ONNX models that used boolean tensors. This document provides a complete mathematical treatment of the topic.
+
+\section{ONNX Type System}
+
+\subsection{Tensor Data Types}
+
+The ONNX specification defines 18 primitive data types for tensors, enumerated in the \texttt{TensorProto.DataType} protobuf enum. Table~\ref{tab:onnx-types} lists the relevant types along with their sizes and numeric codes.
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{ONNX Type} & \textbf{Enum Value} & \textbf{Size (bytes)} & \textbf{OpenCV CV\_ Type} \\
+\hline
+\texttt{float16}   & 10 & 2 & CV\_16F \\
+\texttt{float32}   & 1  & 4 & CV\_32F \\
+\texttt{float64}   & 11 & 8 & CV\_64F \\
+\texttt{int8}      & 3  & 1 & CV\_8S  \\
+\texttt{int16}     & 5  & 2 & CV\_16S \\
+\texttt{int32}     & 6  & 4 & CV\_32S \\
+\texttt{int64}     & 7  & 8 & CV\_64F (approx) \\
+\texttt{uint8}     & 2  & 1 & CV\_8U  \\
+\texttt{uint16}    & 4  & 2 & CV\_16U \\
+\texttt{bool}      & 9  & 1 & \textcolor{green!60!black}{\textbf{CV\_8U (fix!)}} \\
+\hline
+\end{tabular}
+\caption{ONNX data types and their OpenCV equivalents.}
+\label{tab:onnx-types}
+\end{table}
+
+\begin{definition}[Boolean Tensor]
+A boolean tensor $\mathcal{T} \in \{0,1\}^{d_1 \times d_2 \times \cdots \times d_n}$ is a multi-dimensional array where each element $\mathcal{T}_{i_1,\ldots,i_n} \in \{0,1\}$, stored as one unsigned byte (\texttt{uint8}) per element.
+\end{definition}
+
+\subsection{Memory Representation}
+
+Both the ONNX \texttt{bool} type and \texttt{uint8} type occupy exactly one byte per element:
+\begin{align}
+\text{sizeof}(\texttt{bool}) &= 1 \text{ byte} \\
+\text{sizeof}(\texttt{uint8}) &= 1 \text{ byte}
+\end{align}
+
+The valid boolean values $\{0, 1\}$ are a strict subset of the uint8 range $[0, 255]$:
+\begin{equation}
+\{0, 1\} \subset [0, 255] = \{x \in \mathbb{Z} : 0 \leq x \leq 255\}
+\end{equation}
+
+This containment justifies the type mapping $\texttt{bool} \mapsto \texttt{CV\_8U}$.
+
+\section{Boolean Operations in Neural Networks}
+
+\subsection{Comparison Operators}
+
+ONNX defines element-wise comparison operators that produce boolean output tensors from numeric inputs:
+
+\begin{align}
+\text{Greater}(A, B)_{ij} &= \mathbf{1}[A_{ij} > B_{ij}] \\
+\text{Less}(A, B)_{ij} &= \mathbf{1}[A_{ij} < B_{ij}] \\
+\text{Equal}(A, B)_{ij} &= \mathbf{1}[A_{ij} = B_{ij}] \\
+\text{GreaterOrEqual}(A, B)_{ij} &= \mathbf{1}[A_{ij} \geq B_{ij}] \\
+\text{LessOrEqual}(A, B)_{ij} &= \mathbf{1}[A_{ij} \leq B_{ij}]
+\end{align}
+
+where $\mathbf{1}[\cdot]$ is the indicator function:
+\begin{equation}
+\mathbf{1}[P] = \begin{cases} 1 & \text{if predicate } P \text{ is true} \\ 0 & \text{otherwise} \end{cases}
+\end{equation}
+
+\subsection{Logical Operators}
+
+Element-wise logical operators take boolean tensors as inputs:
+
+\begin{align}
+\text{And}(A, B)_{ij} &= A_{ij} \wedge B_{ij} = A_{ij} \cdot B_{ij} \\
+\text{Or}(A, B)_{ij} &= A_{ij} \vee B_{ij} = \min(A_{ij} + B_{ij}, 1) \\
+\text{Not}(A)_{ij} &= \neg A_{ij} = 1 - A_{ij} \\
+\text{Xor}(A, B)_{ij} &= A_{ij} \oplus B_{ij} = (A_{ij} + B_{ij}) \bmod 2
+\end{align}
+
+Note that for $A, B \in \{0,1\}$, these are equivalent to standard arithmetic modulo 2, which is the structure of the Galois field $\text{GF}(2)$.
+
+\subsection{Conditional Operator: Where}
+
+The \texttt{Where} operator implements element-wise conditional selection:
+
+\begin{equation}
+\text{Where}(\text{cond}, X, Y)_{ij} = \begin{cases} X_{ij} & \text{if } \text{cond}_{ij} = 1 \\ Y_{ij} & \text{if } \text{cond}_{ij} = 0 \end{cases}
+\end{equation}
+
+This can be written compactly as:
+\begin{equation}
+\text{Where}(\text{cond}, X, Y) = \text{cond} \odot X + (1 - \text{cond}) \odot Y
+\end{equation}
+
+where $\odot$ denotes element-wise multiplication (Hadamard product) and the boolean condition is treated as a numeric mask.
+
+\section{Type Inference Through ONNX Computation Graphs}
+
+\subsection{Graph Structure}
+
+An ONNX computation graph is a directed acyclic graph (DAG):
+\begin{equation}
+G = (V, E, \tau)
+\end{equation}
+where:
+\begin{itemize}
+  \item $V$ = set of operator nodes (e.g., \texttt{Greater}, \texttt{Where}, \texttt{MatMul})
+  \item $E \subseteq V \times V$ = directed edges representing tensor flow
+  \item $\tau : E \to \mathcal{D}$ = type labeling function mapping each tensor to a data type in $\mathcal{D}$
+\end{itemize}
+
+\subsection{Type Propagation Rules}
+
+Type inference assigns $\tau(e)$ to every edge $e$ in $G$. For each node $v$ with input types $(\tau_1, \ldots, \tau_k)$, a type signature $\sigma_v$ determines the output type:
+
+\begin{equation}
+\tau_{\text{out}}(v) = \sigma_v(\tau_1(v), \ldots, \tau_k(v))
+\end{equation}
+
+For the comparison operators:
+\begin{equation}
+\sigma_{\text{Greater}}(\text{float32}, \text{float32}) = \text{bool}
+\end{equation}
+
+For the \texttt{Where} operator:
+\begin{equation}
+\sigma_{\text{Where}}(\text{bool}, T, T) = T \quad \text{for any type } T
+\end{equation}
+
+\begin{theorem}[Type Safety]
+If $\tau$ is a consistent type labeling (i.e., every node's input types match its expected signature), then for every edge $e \in E$, the memory allocated for the tensor at $e$ is $\prod_{d} \text{dim}_d(e) \times \text{sizeof}(\tau(e))$ bytes.
+\end{theorem}
+
+\subsection{The Bug: Missing Bool Mapping}
+
+Before the fix, the OpenCV DNN type conversion table contained:
+
+\begin{verbatim}
+int getTypeFromString(const String& typeName) {
+    if (typeName == "float") return CV_32F;
+    if (typeName == "double") return CV_64F;
+    // ... other types ...
+    // MISSING: bool mapping!
+}
+\end{verbatim}
+
+When the type inference propagated a \texttt{bool} output type through the graph, the type lookup returned $-1$ (invalid), causing \texttt{Mat::create()} to throw an assertion error during memory allocation.
+
+The fix adds:
+\begin{verbatim}
+if (typeName == "bool") return CV_8U;
+\end{verbatim}
+
+\section{TikZ Figure: ONNX Computation Graph}
+
+Figure~\ref{fig:onnx-graph} shows an example ONNX computation graph where boolean tensors flow from a comparison operator to a \texttt{Where} operator.
+
+\begin{figure}[h!]
+\centering
+\begin{tikzpicture}[
+    node distance=1.8cm and 2.5cm,
+    op/.style={draw, rectangle, rounded corners, fill=blue!15, minimum width=2.2cm, minimum height=0.9cm, font=\small\bfseries},
+    tensor/.style={draw, ellipse, fill=gray!15, minimum width=1.8cm, minimum height=0.7cm, font=\small},
+    booltensor/.style={draw, ellipse, fill=green!25, minimum width=1.8cm, minimum height=0.7cm, font=\small},
+    >=Stealth
+]
+
+% Input tensors
+\node[tensor] (A) {$A$: float32};
+\node[tensor, right=3.5cm of A] (B) {$B$: float32};
+
+% Greater op
+\node[op, below=1.2cm of $(A)!0.5!(B)$] (greater) {Greater};
+
+% Bool tensor (the fixed one)
+\node[booltensor, below=1.2cm of greater] (boolT) {$C$: \textbf{bool}};
+
+% Other inputs to Where
+\node[tensor, left=2.5cm of boolT] (X) {$X$: float32};
+\node[tensor, right=2.5cm of boolT] (Y) {$Y$: float32};
+
+% Where op
+\node[op, below=1.8cm of boolT] (where) {Where};
+
+% Output
+\node[tensor, below=1.2cm of where] (out) {$Z$: float32};
+
+% Arrows
+\draw[->] (A) -- (greater);
+\draw[->] (B) -- (greater);
+\draw[->, line width=1.5pt, color=green!60!black] (greater) -- node[right, font=\small, color=green!60!black] {bool (fixed!)} (boolT);
+\draw[->] (boolT) -- (where);
+\draw[->] (X) -- (where);
+\draw[->] (Y) -- (where);
+\draw[->] (where) -- (out);
+
+% Labels for input types
+\node[font=\footnotesize, above=0.1cm of A] {input};
+\node[font=\footnotesize, above=0.1cm of B] {input};
+\node[font=\footnotesize, below=0.1cm of out] {output};
+
+\end{tikzpicture}
+\caption{ONNX computation graph: float32 inputs flow into \texttt{Greater}, producing a \textbf{bool} tensor (green, fixed), which is then consumed by \texttt{Where} alongside two float32 tensors to produce a float32 output. Before the fix, the bool edge had no CV\_ type mapping, causing a crash.}
+\label{fig:onnx-graph}
+\end{figure}
+
+\section{Bitwise Representation and GF(2) Algebra}
+
+\subsection{Boolean Arithmetic}
+
+The set $\mathbb{B} = \{0, 1\}$ with operations AND ($\wedge$) and XOR ($\oplus$) forms the Galois field $\text{GF}(2)$:
+
+\begin{align}
+0 \oplus 0 &= 0, & 1 \oplus 0 &= 1, & 0 \oplus 1 &= 1, & 1 \oplus 1 &= 0 \\
+0 \wedge 0 &= 0, & 1 \wedge 0 &= 0, & 0 \wedge 1 &= 0, & 1 \wedge 1 &= 1
+\end{align}
+
+\begin{theorem}[$\text{GF}(2)$ Structure]
+$(\{0,1\}, \oplus, \wedge)$ is a field. Every element is its own additive inverse: $a \oplus a = 0$ for all $a \in \{0,1\}$.
+\end{theorem}
+
+\subsection{Tensor Operations Over GF(2)}
+
+For boolean tensors $A, B \in \{0,1\}^{m \times n}$:
+\begin{equation}
+\text{Xor}(A, B)_{ij} = A_{ij} \oplus B_{ij} = (A_{ij} + B_{ij}) \bmod 2
+\end{equation}
+
+This corresponds to matrix addition over $\text{GF}(2)$, which is well-defined and computationally efficient using bitwise XOR instructions on modern CPUs.
+
+\section{Data Flow and Memory Allocation}
+
+\subsection{Allocation Formula}
+
+For a boolean tensor of shape $(d_1, d_2, \ldots, d_n)$:
+\begin{equation}
+\text{mem}(\mathcal{T}) = \prod_{k=1}^{n} d_k \times \underbrace{1}_{\text{sizeof(bool)}} \text{ bytes}
+\end{equation}
+
+This is identical to the allocation formula for \texttt{uint8} tensors of the same shape, confirming that the mapping $\texttt{bool} \mapsto \texttt{CV\_8U}$ is memory-safe.
+
+\subsection{Type Inference Failure Mode}
+
+Without the bool mapping, the type inference function returns $-1$, and OpenCV's \texttt{Mat::create()} is called with type $-1$:
+
+\begin{equation}
+\text{depth} = \text{CV\_MAT\_DEPTH}(-1) = \text{undefined} \Rightarrow \text{CV\_Assert fails}
+\end{equation}
+
+The assertion \texttt{CV\_Assert(0 <= \_type \&\& \_type <= CV\_64F)} fires, crashing the program.
+
+\section{Correctness of the Fix}
+
+\begin{theorem}[Fix Correctness]
+The mapping $\texttt{bool} \mapsto \texttt{CV\_8U}$ is correct. Specifically:
+\begin{enumerate}
+  \item Memory safety: $\text{sizeof}(\texttt{bool}) = \text{sizeof}(\texttt{uint8}) = 1$, so allocation is correct.
+  \item Value preservation: $\{0,1\} \subset [0,255]$, so no bool value is lost.
+  \item Downstream ops: \texttt{Where} and logical operators treat the buffer as a byte mask, which is consistent with $\texttt{CV\_8U}$ semantics.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+Point 1 follows from the C++ standard (bool occupies at least one byte) and the ONNX spec (BOOL = 1 byte). Point 2 follows from $\{0,1\} \subset \{0,\ldots,255\}$. Point 3 follows from OpenCV DNN's \texttt{Where} implementation reading each byte as a boolean mask via \texttt{uchar* cond\_ptr}.
+\end{proof}
+
+\section{References}
+
+\begin{enumerate}
+  \item ONNX Specification. \textit{ONNX Data Types}. \url{https://github.com/onnx/onnx/blob/main/docs/IR.md}
+  \item ONNX Runtime. \textit{Type System and Type Inference}. Microsoft, 2023.
+  \item OpenCV DNN Module. \textit{dnn/src/onnx/onnx\_importer.cpp}. OpenCV repository.
+  \item Goodfellow, I., Bengio, Y., Courville, A. \textit{Deep Learning}. MIT Press, 2016.
+  \item Protocol Buffers. \textit{TensorProto.DataType enum}. \url{https://github.com/onnx/onnx/blob/main/onnx/onnx.proto}
+\end{enumerate}
+
+\end{document}
