@@ -1,0 +1,80 @@
+\documentclass[tikz,border=12pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  step/.style={draw, rounded corners, minimum width=3.8cm,
+               minimum height=1.0cm, align=center, font=\small, thick},
+  okstep/.style={step, fill=green!15, draw=green!60!black},
+  failstep/.style={step, fill=red!15, draw=red!70},
+  warnstep/.style={step, fill=orange!15, draw=orange!80},
+  neutralstep/.style={step, fill=blue!10, draw=blue!50},
+  arrow/.style={-{Stealth}, thick},
+  font=\small
+]
+
+%% TITLE
+\node[font=\bfseries\large] at (3.5, 9.0) {VideoCapture Frame Count -- Misleading Pipeline};
+
+%% ---- STEP 1: open() ----
+\node[okstep] (open) at (3.5, 8.0) {cap.open("video.mp4")};
+\node[green!60!black, right=0.3cm of open, font=\footnotesize] {Returns \textbf{true}};
+
+%% arrow
+\draw[arrow] (open) -- ++(0,-1.2);
+
+%% ---- STEP 2: get(FRAME_COUNT) ----
+\node[warnstep] (getfc) at (3.5, 6.2)
+  {cap.get(CAP\_PROP\_FRAME\_COUNT)};
+\node[right=0.3cm of getfc, align=left, font=\footnotesize] {
+  Returns \textbf{1200}\\
+  \textcolor{red!70}{(from header only!)}
+};
+
+% annotation box
+\node[draw=orange, dashed, rounded corners, fill=orange!10,
+      align=center, font=\footnotesize] at (9.5, 6.2)
+  {Reads container\\metadata ONLY.\\No decode attempted.};
+\draw[-{Stealth}, dashed, orange] (5.8, 6.2) -- (8.4, 6.2)
+  node[midway, above, font=\tiny] {Misleading!};
+
+%% arrow
+\draw[arrow] (getfc) -- ++(0,-1.2);
+
+%% ---- STEP 3: read() ----
+\node[failstep] (readf) at (3.5, 4.4)
+  {cap.read(frame)};
+\node[red!70, right=0.3cm of readf, font=\bfseries\footnotesize]
+  {Returns \textbf{false} -- FAILS};
+
+% starburst crash
+\node[draw=red, fill=red!20, regular polygon, regular polygon sides=8,
+      minimum width=1.6cm, font=\footnotesize\bfseries, text=red] at (9.5, 4.4)
+  {DECODE\\FAIL};
+\draw[-{Stealth}, red, thick] (5.6, 4.4) -- (8.4, 4.4);
+
+%% arrow
+\draw[arrow] (readf) -- ++(0,-1.4);
+
+%% ---- STEP 4: programmer loop ----
+\node[neutralstep, minimum width=6.0cm] (loop) at (3.5, 2.4)
+  {for i in range(1200):\\
+   \quad read() fails every iteration\\
+   \quad 0 frames processed};
+
+%% ---- WARNING BOX ----
+\begin{scope}[on background layer]
+  \node[draw=red, very thick, dashed, rounded corners,
+        fill=red!5, align=center, font=\footnotesize,
+        inner sep=8pt] at (3.5, 0.6)
+  {
+    \textcolor{red}{\textbf{!! DOCUMENTATION WARNING (the fix) !!}}\\[4pt]
+    CAP\_PROP\_FRAME\_COUNT is metadata-only.\\
+    ALWAYS verify \texttt{read()} returns true.\\
+    Do NOT loop \textit{frame\_count} times without checking.
+  };
+\end{scope}
+
+\end{tikzpicture}
+\end{document}
