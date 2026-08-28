@@ -1,0 +1,373 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+\pgfplotsset{compat=1.18}
+
+\geometry{margin=1in}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+
+\title{\textbf{Algorithm Mathematics Explained}\\
+\large Image Resampling: INTER\_AREA, Anti-Aliasing,\\
+and the EWA Filter under Affine Warps\\[0.5em]
+\normalsize OpenCV Fix Branch: \texttt{fix/issue-21060-warpaffine-interarea-complex}}
+\author{OpenCV Documentation}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{Sampling Theory Fundamentals}
+%======================================================================
+
+\subsection{Continuous and Discrete Signals}
+
+Let $f : \mathbb{R} \to \mathbb{R}$ be a continuous, band-limited signal with maximum frequency
+$f_{\max}$.  Uniform sampling at rate $f_s$ produces the discrete sequence
+\[
+  f_s[n] = f\!\left(\frac{n}{f_s}\right), \quad n \in \mathbb{Z}.
+\]
+
+\begin{theorem}[Nyquist--Shannon Sampling Theorem]
+$f$ can be perfectly reconstructed from $f_s[n]$ if and only if
+\[
+  f_s \geq 2 f_{\max}.
+\]
+The reconstruction formula is
+\[
+  f(t) = \sum_{n=-\infty}^{\infty} f_s[n]\, \mathrm{sinc}\!\left(f_s t - n\right),
+  \quad \mathrm{sinc}(x) = \frac{\sin(\pi x)}{\pi x}.
+\]
+\end{theorem}
+
+\subsection{Aliasing}
+
+When $f_s < 2 f_{\max}$, high-frequency components \emph{fold back} into the baseband:
+\[
+  f_{\mathrm{alias}} = \bigl|f_{\mathrm{signal}} - k\, f_s\bigr|, \quad k \in \mathbb{Z}.
+\]
+In images, aliasing manifests as Moir\'{e} patterns, jagged edges, and false textures — especially
+during downsampling.
+
+%======================================================================
+\section{Image Downsampling as Resampling}
+%======================================================================
+
+An image $I : \mathbb{Z}^2 \to \mathbb{R}$ (or $\mathbb{R}^C$ for $C$ channels) can be viewed
+as a sampled version of a continuous radiance field $\tilde{I} : \mathbb{R}^2 \to \mathbb{R}$.
+Resampling to a new grid involves:
+\begin{enumerate}
+  \item \textbf{Reconstruct} $\tilde{I}$ from $I$ via interpolation.
+  \item \textbf{Pre-filter} $\tilde{I}$ to remove frequencies above the new Nyquist limit.
+  \item \textbf{Sample} the filtered signal at the new grid.
+\end{enumerate}
+
+For downscale factor $s < 1$ (output smaller than input), the output pixel at $(x',y')$
+corresponds to a $\tfrac{1}{s} \times \tfrac{1}{s}$ region of the input image.
+
+\subsection{Comparison of OpenCV Interpolation Flags}
+
+\begin{center}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Method} & \textbf{Anti-alias} & \textbf{Correct footprint} & \textbf{Speed} & \textbf{Quality} \\
+\hline
+\texttt{INTER\_NEAREST}  & No  & No    & $O(1)$    & Low \\
+\texttt{INTER\_LINEAR}   & No  & No    & $O(1)$    & Medium \\
+\texttt{INTER\_AREA} (int) & Yes & Box  & $O(k^2)$  & High \\
+EWA                       & Yes & Ellipse & $O(\mathrm{area})$ & Very high \\
+\texttt{warpAffineAntiAliased} & Approx & Gauss & $O(WH)$ & High \\
+\hline
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Area Resampling Mathematics}
+%======================================================================
+
+\subsection{Integer Downscale}
+
+For integer downscale factor $k \in \mathbb{Z}_{>0}$, each output pixel $(x,y)$ is the exact
+average of a $k \times k$ block:
+\begin{equation}\label{eq:interarea-int}
+  I_{\mathrm{out}}(x,y)
+  = \frac{1}{k^2}\sum_{i=0}^{k-1}\sum_{j=0}^{k-1} I_{\mathrm{in}}(kx+i,\; ky+j).
+\end{equation}
+This is equivalent to convolving with a box filter of width $k$ and then decimating.
+
+\subsection{Non-Integer Scale}
+
+For non-integer scale $s \in (0,1)$, define the footprint of output pixel $(x,y)$ in the input
+coordinate system:
+\[
+  A(x,y) = \left[\frac{x}{s} - \frac{1}{2s},\;\frac{x}{s} + \frac{1}{2s}\right]
+            \times
+            \left[\frac{y}{s} - \frac{1}{2s},\;\frac{y}{s} + \frac{1}{2s}\right].
+\]
+The area-averaged output is then:
+\begin{equation}\label{eq:interarea-nonint}
+  I_{\mathrm{out}}(x,y)
+  = \frac{1}{|A|}\iint_{A(x,y)} \tilde{I}(u,v)\,du\,dv,
+  \quad |A| = \frac{1}{s^2}.
+\end{equation}
+
+OpenCV's \texttt{INTER\_AREA} implements \eqref{eq:interarea-int} for integer $k$ and a bilinear
+approximation of \eqref{eq:interarea-nonint} for non-integer scales.
+
+%======================================================================
+\section{Affine Warp Combined with Area Resampling}
+%======================================================================
+
+An affine warp maps output coordinates to input coordinates via
+\[
+  \begin{pmatrix} u \\ v \end{pmatrix}
+  = \mathbf{A}\begin{pmatrix} x' \\ y' \end{pmatrix} + \mathbf{b},
+  \quad \mathbf{A} \in \mathbb{R}^{2\times 2},\; \mathbf{b} \in \mathbb{R}^2.
+\]
+
+The footprint of output pixel $(x', y')$ (a unit square centered at $(x',y')$) maps to a
+\emph{parallelogram} in the source image:
+\begin{equation}\label{eq:parallelogram}
+  A_{\mathrm{footprint}}(x',y')
+  = \mathbf{A}^{-1}\!\left(\left[x'-\tfrac{1}{2}, x'+\tfrac{1}{2}\right]
+    \times \left[y'-\tfrac{1}{2}, y'+\tfrac{1}{2}\right]\right) + \mathbf{A}^{-1}\mathbf{b}'.
+\end{equation}
+
+This parallelogram has area $|\det \mathbf{A}^{-1}|$.  True \texttt{INTER\_AREA} under affine
+warp would compute
+\[
+  I_{\mathrm{out}}(x',y')
+  = \frac{1}{|\det\mathbf{A}^{-1}|}\iint_{A_{\mathrm{footprint}}(x',y')} \tilde{I}(u,v)\,du\,dv.
+\]
+
+%======================================================================
+\section{EWA (Elliptical Weighted Average) Filter}
+%======================================================================
+
+The EWA filter, introduced by Heckbert (1989), approximates the parallelogram footprint with
+an \emph{ellipse} and weights samples by a Gaussian inside that ellipse.
+
+\subsection{Ellipse Parameters from the Jacobian}
+
+Let $\mathbf{J} = \mathbf{A}^{-1}$ be the Jacobian of the inverse warp.  Define the
+\emph{metric tensor}
+\[
+  \mathbf{M} = \mathbf{J}^T \mathbf{J}.
+\]
+The EWA ellipse for output pixel at origin is
+\[
+  \mathcal{E} = \bigl\{\mathbf{x} \in \mathbb{R}^2 : \mathbf{x}^T \mathbf{M} \mathbf{x} \leq 1\bigr\}.
+\]
+
+\subsection{Gaussian Weighting}
+
+The EWA estimate is
+\begin{equation}\label{eq:ewa}
+  I_{\mathrm{EWA}}(x',y')
+  = \frac{\displaystyle\sum_{\mathbf{u} \in \mathcal{E}(x',y')} w(\mathbf{u} - \mathbf{u}_0)\,I(\mathbf{u})}
+         {\displaystyle\sum_{\mathbf{u} \in \mathcal{E}(x',y')} w(\mathbf{u} - \mathbf{u}_0)},
+  \quad w(\mathbf{x}) = e^{-\alpha\,\mathbf{x}^T \mathbf{M} \mathbf{x}},
+\end{equation}
+where $\mathbf{u}_0 = \mathbf{J}\,(x',y')^T + \mathbf{b}$ is the center of the footprint and
+$\alpha$ is a sharpness parameter (typically $\alpha = \log 2$ or $\alpha = 1$).
+
+\subsection{Spectral Interpretation}
+
+The Fourier transform of the Gaussian kernel in \eqref{eq:ewa} is
+\[
+  \hat{w}(\boldsymbol{\omega}) = \frac{\pi}{\alpha}\exp\!\left(-\frac{\pi^2}{\alpha}
+    \boldsymbol{\omega}^T \mathbf{M}^{-1} \boldsymbol{\omega}\right).
+\]
+This is an anisotropic Gaussian in frequency space whose axes are aligned with those of the
+EWA ellipse.  The filter cuts off frequencies along each axis $i$ at approximately
+$\omega_i \approx \sqrt{\alpha/\pi^2} \cdot 1/\sigma_i$, where $\sigma_i^2$ is the $i$-th
+eigenvalue of $\mathbf{M}$.
+
+%======================================================================
+\section{The \texttt{warpAffineAntiAliased} Approximation}
+%======================================================================
+
+Since EWA requires iterating over a potentially large elliptical footprint, OpenCV uses an
+isotropic Gaussian approximation:
+
+\begin{enumerate}
+  \item Compute the eigenvalues $\lambda_1 \leq \lambda_2$ of $\mathbf{M} = \mathbf{J}^T\mathbf{J}$.
+  \item Set blur radius:
+        \[
+          \sigma = \sqrt{\frac{\lambda_{\max}}{\pi^2}}, \quad \lambda_{\max} = \lambda_2.
+        \]
+  \item Pre-blur the source image with a Gaussian of standard deviation $\sigma$:
+        $\tilde{I}_\sigma = G_\sigma * I$.
+  \item Apply \texttt{warpAffine} with \texttt{INTER\_LINEAR} on $\tilde{I}_\sigma$.
+\end{enumerate}
+
+This is $O(WH)$ (separable Gaussian blur over the whole image), far cheaper than per-pixel EWA.
+The approximation is isotropic — it may over-blur along the minor axis of the warp ellipse, but
+prevents aliasing along the major axis.
+
+\begin{remark}
+The issue \#21060 arises because \texttt{warpAffine} with \texttt{INTER\_AREA} does \emph{not}
+automatically apply the pre-blur; calling \texttt{warpAffine(src, dst, M, dsize, INTER\_AREA)}
+uses the area-average formula only for axis-aligned downscaling, not for general affine warps.
+The fix ensures the anisotropic pre-blur is applied whenever $|\det\mathbf{A}| < 1$ (downscaling).
+\end{remark}
+
+%======================================================================
+\section{TikZ Figures}
+%======================================================================
+
+\subsection{Figure 1: Pixel Footprint under Affine Warp}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.2, >=Stealth]
+  % Source grid
+  \draw[gray!30] (-0.5,-0.5) grid (4.5,4.5);
+  \node[gray, above] at (2,4.5) {Source image grid};
+
+  % Affine-mapped parallelogram footprint (example: shear+scale)
+  \coordinate (P1) at (1.0, 0.8);
+  \coordinate (P2) at (2.4, 0.5);
+  \coordinate (P3) at (3.0, 2.1);
+  \coordinate (P4) at (1.6, 2.4);
+
+  \fill[blue!20, opacity=0.5] (P1)--(P2)--(P3)--(P4)--cycle;
+  \draw[blue, thick] (P1)--(P2)--(P3)--(P4)--cycle;
+  \node[blue, below] at ($(P1)!0.5!(P2)$) {\small parallelogram footprint};
+
+  % EWA ellipse approximation
+  \draw[red, thick, dashed] (2.0, 1.45) ellipse (0.82 and 0.72);
+  \node[red, right] at (2.82, 1.45) {\small EWA ellipse};
+
+  % Center point
+  \fill[black] (2.0, 1.45) circle (2pt) node[above right] {\small $\mathbf{u}_0$};
+
+  % Output pixel label (separate, to the right)
+  \node[draw, fill=yellow!30, minimum size=1cm] at (6.0, 1.5) {\small output\\[-1pt]\small pixel $(x',y')$};
+  \draw[->, thick, orange] (5.5, 1.5) -- (3.5, 1.8) node[midway, above, sloped] {\small $\mathbf{J}$};
+\end{tikzpicture}
+\caption{Pixel footprint under an affine warp. The unit square of output pixel $(x',y')$ maps
+to a parallelogram (blue) in the source grid. The EWA filter approximates this parallelogram
+with an ellipse (red dashed), whose shape is determined by $\mathbf{J}^T\mathbf{J}$.}
+\end{figure}
+
+\subsection{Figure 2: Frequency Domain — Anti-Aliasing Filter}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=12cm, height=6cm,
+    xmin=-2.5, xmax=2.5,
+    ymin=-0.1, ymax=1.3,
+    xlabel={Frequency $f$},
+    ylabel={Magnitude},
+    xtick={-2,-1,0,1,2},
+    xticklabels={$-2f_s$, $-f_s$, $0$, $f_s$, $2f_s$},
+    ytick={0,1},
+    axis lines=left,
+    legend pos=north east,
+    clip=false
+  ]
+    % Original signal spectrum (triangle shape)
+    \addplot[blue, thick, domain=-0.5:0.5, samples=50] {1 - 2*abs(x)};
+    \addlegendentry{Signal spectrum}
+
+    % Aliased copy at f_s
+    \addplot[red!60, thick, dashed, domain=0.5:1.5, samples=50] {0.5*(1 - 2*abs(x-1))};
+    \addlegendentry{Aliased copy}
+
+    % Aliased copy at -f_s
+    \addplot[red!60, thick, dashed, domain=-1.5:-0.5, samples=50] {0.5*(1 - 2*abs(x+1))};
+
+    % Anti-aliasing lowpass filter (brick wall at f_s/2 = 0.5)
+    \addplot[green!60!black, very thick, domain=-0.5:0.5, samples=3] {1.1};
+    \addplot[green!60!black, very thick] coordinates {(-0.5,0)(-0.5,1.1)};
+    \addplot[green!60!black, very thick] coordinates {(0.5,0)(0.5,1.1)};
+    \addlegendentry{AA filter (ideal)}
+
+    % Vertical lines at +-f_s/2
+    \addplot[gray, dashed] coordinates {(0.5,0)(0.5,1.25)};
+    \addplot[gray, dashed] coordinates {(-0.5,0)(-0.5,1.25)};
+    \node[gray] at (axis cs:0.5,1.27) {$f_s/2$};
+    \node[gray] at (axis cs:-0.5,1.27) {$-f_s/2$};
+  \end{axis}
+\end{tikzpicture}
+\caption{Frequency-domain view of aliasing and anti-aliasing. The signal spectrum (blue) must be
+band-limited to $[-f_s/2, f_s/2]$ before downsampling. Aliased copies (red dashed) appear at
+multiples of $f_s$. The ideal anti-aliasing (AA) filter (green) is a brick-wall lowpass at
+$f_s/2$; in practice, a Gaussian approximation is used (\texttt{warpAffineAntiAliased}).}
+\end{figure}
+
+%======================================================================
+\section{Derivation: Optimal Gaussian $\sigma$ for Isotropic Pre-Blur}
+%======================================================================
+
+The EWA ellipse covers a region of area $\pi\sqrt{\det\mathbf{M}^{-1}} = \pi/\sqrt{\det\mathbf{M}}$
+in the source image.  An isotropic Gaussian $G_\sigma$ with the same ``effective support'' satisfies
+$\pi\sigma^2 \approx \pi\lambda_{\max}/\pi^2$, giving
+\[
+  \sigma^2 \approx \frac{\lambda_{\max}}{\pi^2}.
+\]
+
+The Gaussian blur in the Fourier domain is $\hat{G}_\sigma(\omega) = e^{-2\pi^2\sigma^2\omega^2}$,
+cutting off at $\omega_{\mathrm{cut}} = \tfrac{1}{2\pi\sigma}$.  With the chosen $\sigma$:
+\[
+  \omega_{\mathrm{cut}}
+  = \frac{1}{2\pi}\cdot\frac{\pi}{\sqrt{\lambda_{\max}}}
+  = \frac{1}{2\sqrt{\lambda_{\max}}}.
+\]
+
+Since $\sqrt{\lambda_{\max}}$ is the largest singular value of $\mathbf{J}$, it represents the
+maximum stretch factor of the warp.  The cutoff $1/(2\sqrt{\lambda_{\max}})$ exactly matches the
+Nyquist frequency of the output grid along the maximally stretched direction.
+
+%======================================================================
+\section{Error Analysis: INTER\_AREA vs.\ True Area Integration}
+%======================================================================
+
+Let $\hat{I}(x,y)$ be the true area-averaged output \eqref{eq:interarea-nonint} and
+$I_{\mathrm{AREA}}(x,y)$ the OpenCV approximation.  The approximation error can be bounded by:
+
+\begin{equation}
+  \left|\hat{I}(x,y) - I_{\mathrm{AREA}}(x,y)\right|
+  \leq \frac{1}{24s^2}\left(\frac{\partial^2 I}{\partial u^2} + \frac{\partial^2 I}{\partial v^2}\right)
+  + O(s^{-4}),
+\end{equation}
+where the first term comes from the trapezoidal approximation of the 2D integral.  This vanishes
+as $s \to 1$ (no downscaling) and grows as $s \to 0$ (extreme downscaling), justifying the use
+of multi-level averaging (image pyramids) for large scale reductions.
+
+%======================================================================
+\section{References}
+%======================================================================
+
+\begin{enumerate}
+  \item P.S.\ Heckbert, ``Fundamentals of Texture Mapping and Image Warping,''
+        M.Sc.\ thesis, UCB/CSD-89-516, UC Berkeley, 1989.
+        (Introduces the EWA filter and derives $\mathbf{J}^T\mathbf{J}$ ellipse parameters.)
+
+  \item A.V.\ Oppenheim and R.W.\ Schafer, \textit{Discrete-Time Signal Processing}, 3rd ed.,
+        Chapter 1. Pearson, 2010.
+
+  \item W.\ Fong, ``Antialiased Image Warping,''
+        \textit{Dr.\ Dobb's Journal}, 1994.
+
+  \item OpenCV Documentation, Geometric Image Transformations,
+        \url{https://docs.opencv.org/4.x/da/d54/group__imgproc__transform.html}.
+
+  \item G.\ Wolberg, \textit{Digital Image Warping}. IEEE Computer Society Press, 1990.
+\end{enumerate}
+
+\end{document}
