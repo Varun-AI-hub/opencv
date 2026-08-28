@@ -1,0 +1,176 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta, calc, decorations.pathreplacing, backgrounds, positioning}
+
+\begin{document}
+
+% ============================================================
+% Diagram: Subdiv2D floating-point in-circle test bug & fix
+% Issue #16763
+% ============================================================
+\begin{tikzpicture}[
+    font=\small,
+    point/.style={circle, fill=black, inner sep=2pt},
+    every label/.style={font=\footnotesize},
+]
+
+% ----------------------------------------------------------------
+% Section 1: The square and its circumcircle
+% ----------------------------------------------------------------
+
+% Draw circumcircle (radius = sqrt(2)/2 * side, here side=2, center at (1,1))
+\draw[thick, blue!60, dashed] (1,1) circle (1.4142cm)
+    node[above right=1.2cm and 0.6cm, blue!70, align=center, font=\footnotesize]
+    {Circumcircle\\(passes through\\all 4 points)};
+
+% Square vertices: A=(0,2), B=(2,2), C=(2,0), D=(0,0)
+\coordinate (A) at (0,2);
+\coordinate (B) at (2,2);
+\coordinate (C) at (2,0);
+\coordinate (D) at (0,0);
+
+% Draw square
+\draw[thick] (A) -- (B) -- (C) -- (D) -- cycle;
+
+% Points
+\node[point, label=above left:{$A$}] at (A) {};
+\node[point, label=above right:{$B$}] at (B) {};
+\node[point, label=below right:{$C$}] at (C) {};
+\node[point, label=below left:{$D$}] at (D) {};
+
+% Section title
+\node[font=\normalsize\bfseries, anchor=north] at (1, 3.0) {Perfect Square};
+\node[font=\footnotesize, anchor=north, align=center] at (1, 2.75)
+    {All 4 corners on the same circle\\$\Rightarrow$ degenerate case};
+
+% ----------------------------------------------------------------
+% Section 2: Two valid triangulations side by side
+% ----------------------------------------------------------------
+
+% Left triangulation (AC diagonal)
+\begin{scope}[xshift=4.5cm]
+    \coordinate (A2) at (0,2);
+    \coordinate (B2) at (2,2);
+    \coordinate (C2) at (2,0);
+    \coordinate (D2) at (0,0);
+
+    \draw[thick] (A2) -- (B2) -- (C2) -- (D2) -- cycle;
+    \draw[thick, red!70] (A2) -- (C2);   % diagonal AC
+
+    \node[point] at (A2) {};
+    \node[point] at (B2) {};
+    \node[point] at (C2) {};
+    \node[point] at (D2) {};
+
+    \node[font=\normalsize\bfseries, anchor=north] at (1, 3.0) {Option 1};
+    \node[font=\footnotesize, anchor=north, red!70] at (1, 2.75) {AC diagonal};
+\end{scope}
+
+% Right triangulation (BD diagonal)
+\begin{scope}[xshift=8cm]
+    \coordinate (A3) at (0,2);
+    \coordinate (B3) at (2,2);
+    \coordinate (C3) at (2,0);
+    \coordinate (D3) at (0,0);
+
+    \draw[thick] (A3) -- (B3) -- (C3) -- (D3) -- cycle;
+    \draw[thick, green!60!black] (B3) -- (D3);   % diagonal BD
+
+    \node[point] at (A3) {};
+    \node[point] at (B3) {};
+    \node[point] at (C3) {};
+    \node[point] at (D3) {};
+
+    \node[font=\normalsize\bfseries, anchor=north] at (1, 3.0) {Option 2};
+    \node[font=\footnotesize, anchor=north, green!60!black] at (1, 2.75) {BD diagonal};
+\end{scope}
+
+% "Both valid" label
+\node[font=\footnotesize\itshape, align=center] at (7.5, -0.5)
+    {Both options are equally valid Delaunay triangulations};
+
+% ----------------------------------------------------------------
+% Section 3: In-circle test determinant
+% ----------------------------------------------------------------
+
+\begin{scope}[yshift=-4cm]
+
+    \node[font=\normalsize\bfseries] at (5, 0.3)
+        {In-Circle Test: Is $D$ inside circumcircle of $\triangle ABC$?};
+
+    % Formula box
+    \node[draw, rounded corners, fill=yellow!15, align=left,
+          font=\footnotesize, inner sep=8pt] at (5, -1.0)
+    {
+        $\text{det} = \begin{vmatrix}
+            A_x - D_x & A_y - D_y & (A_x^2 + A_y^2) - (D_x^2 + D_y^2) \\
+            B_x - D_x & B_y - D_y & (B_x^2 + B_y^2) - (D_x^2 + D_y^2) \\
+            C_x - D_x & C_y - D_y & (C_x^2 + C_y^2) - (D_x^2 + D_y^2)
+        \end{vmatrix}$ \\[6pt]
+        \hspace{1em}$> 0$: $D$ inside circle $\Rightarrow$ flip diagonal \\
+        \hspace{1em}$= 0$: $D$ on circle (degenerate) \\
+        \hspace{1em}$< 0$: $D$ outside circle $\Rightarrow$ keep diagonal
+    };
+
+    % Floating-point problem
+    \node[draw, rounded corners, fill=red!10, align=left,
+          font=\footnotesize, inner sep=8pt] at (5, -3.5)
+    {
+        \textbf{Floating-point problem:} \\
+        Theory: $\text{det} = 0.000000000000000$ (exact zero) \\
+        Reality: $\text{det} = +0.000000000000002$ (flip!) \\
+        \hspace{4.5em}or: $\text{det} = -0.000000000000001$ (don't flip) \\[4pt]
+        $\Rightarrow$ Non-deterministic result depending on rounding
+    };
+
+\end{scope}
+
+% ----------------------------------------------------------------
+% Section 4: The fix — tolerance band
+% ----------------------------------------------------------------
+
+\begin{scope}[yshift=-9.5cm]
+
+    \node[font=\normalsize\bfseries] at (5, 0.3) {The Fix: Epsilon Tolerance};
+
+    % Number line
+    \draw[thick, ->] (1, -0.5) -- (9, -0.5) node[right] {det value};
+
+    % Zero marker
+    \draw[thick] (5, -0.4) -- (5, -0.6) node[below] {$0$};
+
+    % Epsilon markers
+    \draw[thick, dashed, orange] (4.2, -0.3) -- (4.2, -0.7)
+        node[below, orange] {$-\varepsilon$};
+    \draw[thick, dashed, orange] (5.8, -0.3) -- (5.8, -0.7)
+        node[below, orange] {$+\varepsilon$};
+
+    % Tolerance band fill
+    \fill[orange!20] (4.2, -0.4) rectangle (5.8, -0.6);
+    \node[font=\footnotesize, orange!80!black] at (5, -1.15)
+        {tolerance band\\``treat as zero''};
+
+    % Left label: flip
+    \node[font=\footnotesize, red!70, align=center] at (2.5, -0.5)
+        {$\leftarrow$ flip\\(D inside)};
+
+    % Right label: flip
+    \node[font=\footnotesize, red!70, align=center] at (7.5, -0.5)
+        {flip $\rightarrow$\\(D inside)};
+
+    % Fix description
+    \node[draw, rounded corners, fill=green!10, align=left,
+          font=\footnotesize, inner sep=8pt] at (5, -2.5)
+    {
+        \textbf{Before fix:} \texttt{if (det > 0) \{ flip(); \}} \\
+        \textbf{After fix:} \texttt{if (det > epsilon) \{ flip(); \}} \\[4pt]
+        Degenerate cases (all 4 points on one circle) now produce a\\
+        stable, consistent triangulation instead of random behavior.
+    };
+
+\end{scope}
+
+\end{tikzpicture}
+
+\end{document}
