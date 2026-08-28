@@ -1,0 +1,410 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+\pgfplotsset{compat=1.18}
+
+\geometry{margin=1in}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+
+\title{\textbf{Algorithm Mathematics Explained}\\
+\large Delaunay Triangulation: In-Circle Test, Quad-Edge Structure,\\
+and Floating-Point Robustness\\[0.5em]
+\normalsize OpenCV Fix Branch: \texttt{fix/issue-16763-subdiv2d-triangulation-complex}}
+\author{OpenCV Documentation}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{Delaunay Triangulation: Definition and Properties}
+%======================================================================
+
+Let $P = \{p_1, p_2, \ldots, p_n\} \subset \mathbb{R}^2$ be a finite set of points in the plane in
+\emph{general position} (no three collinear, no four cocircular).
+
+\begin{definition}[Triangulation]
+A \emph{triangulation} $T$ of $P$ is a maximal planar straight-line graph whose vertex set is $P$.
+Equivalently, $T$ partitions the convex hull $\mathrm{CH}(P)$ into triangles whose vertices are
+elements of $P$ and whose interiors are pairwise disjoint.
+\end{definition}
+
+\begin{definition}[Delaunay Triangulation]
+The \emph{Delaunay triangulation} $\mathcal{DT}(P)$ is the unique triangulation $T$ of $P$ such
+that for every triangle $t \in T$, the open circumdisk $\mathrm{circ}(t)$ contains no point of $P$
+in its interior:
+\[
+  \forall t = (p_i, p_j, p_k) \in T,\quad \forall p_\ell \in P \setminus \{p_i,p_j,p_k\}:\;
+  p_\ell \notin \mathrm{int}\bigl(\mathrm{circ}(p_i,p_j,p_k)\bigr).
+\]
+\end{definition}
+
+\begin{theorem}[Max-Min Angle]
+Among all triangulations of $P$, the Delaunay triangulation maximizes the minimum interior angle.
+Equivalently, it maximizes the vector of sorted angles in lexicographic order.
+\end{theorem}
+
+The Delaunay triangulation is dual to the \emph{Voronoi diagram} $\mathcal{V}(P)$: each Voronoi
+cell is
+\[
+  V_i = \bigl\{x \in \mathbb{R}^2 : \|x - p_i\| \leq \|x - p_j\| \;\forall j \neq i\bigr\},
+\]
+and the dual edge connecting $p_i$ to $p_j$ in $\mathcal{DT}(P)$ corresponds to the Voronoi edge
+shared by $V_i$ and $V_j$.
+
+%======================================================================
+\section{The In-Circle Predicate (Shewchuk)}
+%======================================================================
+
+The cornerstone of Delaunay algorithms is an orientation-based \emph{in-circle test}.
+
+\begin{definition}[In-Circle Predicate]
+Given four points $A=(a_x,a_y)$, $B=(b_x,b_y)$, $C=(c_x,c_y)$, $D=(d_x,d_y)$ with $A,B,C$
+ordered counterclockwise, define
+\begin{equation}\label{eq:incircle}
+  \mathrm{InCircle}(A,B,C,D) = \det \begin{pmatrix}
+    a_x - d_x & a_y - d_y & (a_x-d_x)^2 + (a_y-d_y)^2 \\
+    b_x - d_x & b_y - d_y & (b_x-d_x)^2 + (b_y-d_y)^2 \\
+    c_x - d_x & c_y - d_y & (c_x-d_x)^2 + (c_y-d_y)^2
+  \end{pmatrix}.
+\end{equation}
+\end{definition}
+
+The sign of this determinant encodes the position of $D$ relative to the circumcircle of
+$\triangle ABC$:
+\begin{itemize}
+  \item $\mathrm{InCircle}(A,B,C,D) > 0$: $D$ lies \emph{inside} the circumcircle $\Rightarrow$
+        the diagonal must be \emph{flipped}.
+  \item $\mathrm{InCircle}(A,B,C,D) = 0$: $A,B,C,D$ are \emph{cocircular}; either triangulation
+        is locally Delaunay.
+  \item $\mathrm{InCircle}(A,B,C,D) < 0$: $D$ lies \emph{outside} the circumcircle $\Rightarrow$
+        no flip required.
+\end{itemize}
+
+\subsection{Derivation via the Lifting Map}
+
+Map each point $p=(x,y)$ to a point $\hat{p} = (x,y,x^2+y^2)$ on the paraboloid
+$z = x^2 + y^2$ in $\mathbb{R}^3$.  Four points are cocircular iff their lifted images are
+\emph{coplanar}.  The signed volume of the tetrahedron $(\hat{A},\hat{B},\hat{C},\hat{D})$ is
+\[
+  \frac{1}{6}\det \begin{pmatrix}
+    a_x & a_y & a_x^2+a_y^2 & 1 \\
+    b_x & b_y & b_x^2+b_y^2 & 1 \\
+    c_x & c_y & c_x^2+c_y^2 & 1 \\
+    d_x & d_y & d_x^2+d_y^2 & 1
+  \end{pmatrix},
+\]
+which equals $\tfrac{1}{6}\,\mathrm{InCircle}(A,B,C,D)$ after row-subtraction by the last row.
+$D$ is below the plane of $\hat{A},\hat{B},\hat{C}$ iff it is inside the circumcircle
+(positive determinant for CCW-ordered $A,B,C$).
+
+%======================================================================
+\section{Guibas--Stolfi Quad-Edge Data Structure}
+%======================================================================
+
+\begin{definition}[Quad-Edge]
+For every undirected edge $e = \{u,v\}$ in a planar subdivision, the
+\emph{quad-edge} data structure stores four directed half-edges:
+\[
+  e,\quad e^{\mathrm{sym}},\quad e^{\mathrm{rot}},\quad e^{\mathrm{rot}^{-1}},
+\]
+where $e$ goes from $u$ to $v$, $e^{\mathrm{sym}}$ from $v$ to $u$, and $e^{\mathrm{rot}}$,
+$e^{\mathrm{rot}^{-1}}$ are edges in the \emph{dual} graph.
+\end{definition}
+
+The fundamental navigation operators are:
+\begin{align}
+  \mathrm{Org}(e)  &= \text{origin vertex of } e, \\
+  \mathrm{Dest}(e) &= \mathrm{Org}(e^{\mathrm{sym}}), \\
+  \mathrm{Onext}(e) &= \text{next CCW edge with same origin}, \\
+  \mathrm{Lnext}(e) &= e^{\mathrm{rot}^{-1}} \cdot \mathrm{Onext}(e^{\mathrm{rot}}),\quad
+                       \text{(next CCW edge of same left face)}.
+\end{align}
+
+\subsection{Edge Flip in $O(1)$}
+
+Suppose edge $e = (A,C)$ is the diagonal of quadrilateral $ABCD$ (where $B$ is to the left of $e$
+and $D$ to the right).  The \emph{flip} replaces $e$ with $e' = (B,D)$:
+
+\begin{enumerate}
+  \item Detach $e$ from its origin/destination rings: update \texttt{Splice}$(e, \mathrm{Oprev}(e))$
+        and \texttt{Splice}$(e^{\mathrm{sym}}, \mathrm{Oprev}(e^{\mathrm{sym}}))$.
+  \item Set $\mathrm{Org}(e) \leftarrow B$, $\mathrm{Dest}(e) \leftarrow D$.
+  \item Reattach: \texttt{Splice}$(e, \mathrm{Lnext}(a))$ and
+        \texttt{Splice}$(e^{\mathrm{sym}}, \mathrm{Lnext}(c))$.
+\end{enumerate}
+
+Total pointer updates: $O(1)$.  The operation preserves the Euler formula $V - E + F = 2$.
+
+%======================================================================
+\section{Incremental Insertion Algorithm}
+%======================================================================
+
+The standard incremental algorithm for $\mathcal{DT}(P)$ inserts points one at a time:
+
+\begin{enumerate}
+  \item \textbf{Locate}: Walk from a seed triangle using the orientation predicate
+        \[
+          \mathrm{Orient}(A,B,C) = \det\begin{pmatrix}
+            a_x-c_x & a_y-c_y \\ b_x-c_x & b_y-c_y
+          \end{pmatrix} \begin{cases} >0 & \text{CCW} \\ =0 & \text{collinear} \\ <0 & \text{CW}\end{cases}
+        \]
+        to locate the triangle $\triangle ABC$ containing the new point $p$.
+  \item \textbf{Split}: Connect $p$ to $A$, $B$, $C$, replacing one triangle with three.
+  \item \textbf{Legalize}: For each new edge $e_i = (p, v_i)$ with opposite vertex $w_i$,
+        if $\mathrm{InCircle}(p, v_i, w_i, \text{fourth vertex}) > 0$, flip $e_i$ and recurse.
+\end{enumerate}
+
+\begin{theorem}[Correctness and Complexity]
+The incremental algorithm produces the unique Delaunay triangulation of $P$ in expected time
+$O(n \log n)$ for random insertion order, and worst-case $O(n^2)$ for adversarial order.
+\end{theorem}
+
+The expected time analysis follows from the observation that each point is re-examined only
+$O(1)$ times on average during the legalization phase, under a random permutation of insertions.
+
+%======================================================================
+\section{Floating-Point Robustness}
+%======================================================================
+
+The key vulnerability of the incremental algorithm is the in-circle test near the zero boundary.
+
+\subsection{The Cocircular Problem}
+
+For four points lying on a common circle (or nearly so):
+\begin{itemize}
+  \item \textbf{Exact arithmetic}: $\mathrm{InCircle}(A,B,C,D) = 0$ — both diagonals are valid.
+  \item \textbf{IEEE 754 double}: roundoff error gives $\mathrm{InCircle}(A,B,C,D) = \pm\varepsilon$
+        for some small $\varepsilon \neq 0$.
+  \item \textbf{Consequence}: the algorithm may flip the same edge repeatedly, producing an
+        infinite loop or an inconsistent triangulation with missing triangles.
+\end{itemize}
+
+\subsection{Adaptive Tolerance Fix}
+
+The fix applied in \texttt{cv::Subdiv2D} uses an adaptive tolerance $\delta$ based on the
+magnitude of the input coordinates:
+\begin{equation}\label{eq:delta}
+  \delta = \varepsilon_{\mathrm{machine}} \cdot
+  \bigl(|a_x|+|a_y|+|b_x|+|b_y|+|c_x|+|c_y|+|d_x|+|d_y|\bigr)^3,
+\end{equation}
+where $\varepsilon_{\mathrm{machine}} \approx 2.22 \times 10^{-16}$ for IEEE 754 double precision.
+
+The modified predicate becomes:
+\[
+  \tilde{\mathrm{InCircle}}(A,B,C,D) = \begin{cases}
+    +1 & \text{if } \mathrm{InCircle}(A,B,C,D) > +\delta \\
+     0 & \text{if } |\mathrm{InCircle}(A,B,C,D)| \leq \delta \quad\text{(treat as cocircular)}\\
+    -1 & \text{if } \mathrm{InCircle}(A,B,C,D) < -\delta
+  \end{cases}
+\]
+
+\begin{remark}
+Shewchuk (1996) provides a more sophisticated \emph{adaptive exact arithmetic} approach that
+computes the determinant to only as many bits of precision as needed to determine the sign,
+avoiding both false positives and unnecessary precision overhead.
+\end{remark}
+
+%======================================================================
+\section{Voronoi Duality}
+%======================================================================
+
+The Voronoi diagram $\mathcal{V}(P)$ partitions $\mathbb{R}^2$ into cells
+\[
+  V_i = \bigl\{x \in \mathbb{R}^2 : \|x - p_i\| \leq \|x - p_j\|\;\forall j \neq i\bigr\}.
+\]
+The \emph{duality} between $\mathcal{DT}(P)$ and $\mathcal{V}(P)$ is exact:
+
+\begin{center}
+\begin{tabular}{ll}
+\textbf{Delaunay} & \textbf{Voronoi} \\
+\hline
+Vertex $p_i$ & Cell $V_i$ \\
+Edge $(p_i,p_j)$ & Edge between $V_i$ and $V_j$ \\
+Triangle $(p_i,p_j,p_k)$ & Voronoi vertex (circumcenter of $p_i,p_j,p_k$) \\
+\end{tabular}
+\end{center}
+
+In OpenCV's \texttt{Subdiv2D}, both structures are maintained simultaneously via the quad-edge
+representation: primal edges encode $\mathcal{DT}(P)$ and their rotations encode $\mathcal{V}(P)$.
+
+%======================================================================
+\section{TikZ Figures}
+%======================================================================
+
+\subsection{Figure 1: Cocircular Points and Both Delaunay Triangulations}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=2.5]
+  % Four points on a unit square (cocircular on circumscribed circle)
+  \coordinate (A) at (0,0);
+  \coordinate (B) at (1,0);
+  \coordinate (C) at (1,1);
+  \coordinate (D) at (0,1);
+
+  % Circumscribed circle radius = sqrt(2)/2, center = (0.5,0.5)
+  \draw[gray!40, dashed, thick] (0.5,0.5) circle ({sqrt(2)/2});
+
+  % Left: triangulation with diagonal AC
+  \begin{scope}[xshift=-1.5cm]
+    \coordinate (A1) at (0,0);
+    \coordinate (B1) at (1,0);
+    \coordinate (C1) at (1,1);
+    \coordinate (D1) at (0,1);
+    \draw[blue!60, dashed, thick] (0.5,0.5) circle ({sqrt(2)/2});
+    \draw[thick] (A1)--(B1)--(C1)--(D1)--cycle;
+    \draw[red, thick] (A1)--(C1);
+    \foreach \p/\lbl in {A1/A, B1/B, C1/C, D1/D}{
+      \fill (\p) circle (1.5pt);
+    }
+    \node[below left] at (A1) {$A$};
+    \node[below right] at (B1) {$B$};
+    \node[above right] at (C1) {$C$};
+    \node[above left] at (D1) {$D$};
+    \node at (0.5,-0.35) {diagonal $AC$};
+  \end{scope}
+
+  % Right: triangulation with diagonal BD (shifted +0.3 right after left block)
+  \begin{scope}[xshift=0.3cm]
+    \coordinate (A2) at (0,0);
+    \coordinate (B2) at (1,0);
+    \coordinate (C2) at (1,1);
+    \coordinate (D2) at (0,1);
+    \draw[blue!60, dashed, thick] (0.5,0.5) circle ({sqrt(2)/2});
+    \draw[thick] (A2)--(B2)--(C2)--(D2)--cycle;
+    \draw[red, thick] (B2)--(D2);
+    \foreach \p in {A2,B2,C2,D2}{
+      \fill (\p) circle (1.5pt);
+    }
+    \node[below left] at (A2) {$A$};
+    \node[below right] at (B2) {$B$};
+    \node[above right] at (C2) {$C$};
+    \node[above left] at (D2) {$D$};
+    \node at (0.5,-0.35) {diagonal $BD$};
+  \end{scope}
+\end{tikzpicture}
+\caption{Four cocircular points (vertices of a unit square) admit two equally valid Delaunay
+triangulations. The circumscribed circle is shown dashed. The floating-point in-circle test
+may spuriously prefer one diagonal, causing repeated flips.}
+\end{figure}
+
+\subsection{Figure 2: Quad-Edge Structure}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth, node distance=3cm]
+  % Two primal vertices
+  \node[circle, draw, fill=blue!20, minimum size=8mm] (U) at (0,0) {$u$};
+  \node[circle, draw, fill=blue!20, minimum size=8mm] (V) at (4,0) {$v$};
+
+  % Two dual face centers
+  \node[diamond, draw, fill=orange!20, minimum size=8mm] (L) at (2, 1.5) {$f_L$};
+  \node[diamond, draw, fill=orange!20, minimum size=8mm] (R) at (2,-1.5) {$f_R$};
+
+  % Primal edge e (u -> v)
+  \draw[->, thick, blue, bend left=10] (U) to node[above, midway]{$e$} (V);
+  % Primal edge e^sym (v -> u)
+  \draw[->, thick, blue, bend left=10] (V) to node[below, midway]{$e^{\mathrm{sym}}$} (U);
+
+  % Dual edge e^rot (fR -> fL)
+  \draw[->, thick, orange, dashed] (R) to node[right, midway]{$e^{\mathrm{rot}}$} (L);
+  % Dual edge e^rot^{-1} (fL -> fR)
+  \draw[->, thick, orange, dashed] (L) to node[left, midway]{$e^{\mathrm{rot}^{-1}}$} (R);
+
+  % Labels
+  \node[above=0.1cm of L] {\small left face};
+  \node[below=0.1cm of R] {\small right face};
+\end{tikzpicture}
+\caption{Quad-edge structure for one undirected edge $\{u,v\}$. The primal directed edges
+$e$ and $e^{\mathrm{sym}}$ connect primal vertices; the dual edges $e^{\mathrm{rot}}$ and
+$e^{\mathrm{rot}^{-1}}$ connect dual face centers (Voronoi vertices). All four are stored as a
+single \texttt{QuadEdge} record.}
+\end{figure}
+
+\subsection{Figure 3: Tolerance Band for the In-Circle Predicate}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+  % Number line
+  \draw[->] (-5,0) -- (5,0) node[right] {$\mathrm{InCircle}(A,B,C,D)$};
+  \draw (0,-0.15) -- (0,0.15) node[above] {$0$};
+
+  % Tolerance band
+  \fill[yellow!60, opacity=0.7] (-1.5,-0.4) rectangle (1.5,0.4);
+  \draw[dashed, red] (-1.5,-0.5) -- (-1.5,0.5) node[above] {$-\delta$};
+  \draw[dashed, red] ( 1.5,-0.5) -- ( 1.5,0.5) node[above] {$+\delta$};
+
+  % Regions
+  \node[blue] at (-3.5, 0) {\large $-$};
+  \node[red!70!black] at ( 3.5, 0) {\large $+$};
+  \node at (0,-0.7) {\small treat as $0$};
+
+  % Annotations
+  \node[blue, below] at (-3.5,-0.2) {\small no flip};
+  \node[red!70!black, below] at (3.5,-0.2) {\small flip};
+\end{tikzpicture}
+\caption{The adaptive tolerance band $[-\delta, +\delta]$ for the in-circle predicate.
+Values inside the band are treated as zero (cocircular), preventing oscillating flips
+on nearly-cocircular inputs. The width $\delta$ scales cubically with coordinate magnitudes
+as in \eqref{eq:delta}.}
+\end{figure}
+
+%======================================================================
+\section{Complexity Analysis Summary}
+%======================================================================
+
+\begin{center}
+\begin{tabular}{lll}
+\hline
+\textbf{Operation} & \textbf{Expected} & \textbf{Worst case} \\
+\hline
+Point location (walk) & $O(\sqrt{n})$ & $O(n)$ \\
+Single insertion + legalization & $O(\log n)$ & $O(n)$ \\
+Total incremental algorithm & $O(n \log n)$ & $O(n^2)$ \\
+Edge flip & $O(1)$ & $O(1)$ \\
+\hline
+\end{tabular}
+\end{center}
+
+With a Kirkpatrick point-location structure, the walk step can be replaced by $O(\log n)$
+deterministic point location, achieving $O(n \log n)$ worst-case total.
+
+%======================================================================
+\section{References}
+%======================================================================
+
+\begin{enumerate}
+  \item L.\ Guibas and J.\ Stolfi, ``Primitives for the Manipulation of General Subdivisions
+        and the Computation of Voronoi Diagrams,''
+        \textit{ACM Trans.\ Graph.}, 4(2):74--123, 1985.
+
+  \item J.R.\ Shewchuk, ``Robust Adaptive Floating-Point Geometric Predicates,''
+        in \textit{Proc.\ 12th Annual Symposium on Computational Geometry},
+        pp.\ 141--150. ACM, 1996.
+
+  \item M.\ de Berg, O.\ Cheong, M.\ van Kreveld, and M.\ Overmars,
+        \textit{Computational Geometry: Algorithms and Applications}, 3rd ed.,
+        Chapter 9. Springer, 2008.
+
+  \item S.\ Fortune, ``Voronoi Diagrams and Delaunay Triangulations,''
+        in \textit{Handbook of Discrete and Computational Geometry},
+        Chapter 23. CRC Press, 1997.
+
+  \item OpenCV Documentation, \texttt{cv::Subdiv2D} class reference,
+        \url{https://docs.opencv.org/}.
+\end{enumerate}
+
+\end{document}
