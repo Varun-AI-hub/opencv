@@ -1,0 +1,56 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  node distance=1.2cm and 2.2cm,
+  box/.style={rectangle, rounded corners=4pt, minimum width=2.4cm, minimum height=0.9cm,
+              text centered, draw=black, font=\small},
+  arrow/.style={-Stealth, thick},
+  label/.style={font=\footnotesize\itshape}
+]
+
+%% ===== BEFORE section =====
+\node[font=\bfseries\large, text=red] (btitle) at (0,0) {BEFORE (broken)};
+
+\node[box, fill=blue!20,   below=0.6cm of btitle] (bconv) {Conv};
+\node[box, fill=orange!25, below=of bconv]         (bbn)   {BatchNorm};
+\node[box, fill=purple!20, below=of bbn]            (brelu) {ReLU};
+\node[box, fill=green!20,  below=of brelu]          (boutA) {Output A};
+\node[box, fill=red!30,    right=2.2cm of bbn]      (boutB) {Output B\\(EMPTY) ✗};
+
+\draw[arrow] (bconv) -- (bbn);
+\draw[arrow] (bbn)   -- (brelu);
+\draw[arrow] (brelu) -- (boutA);
+\draw[arrow, red, thick, dashed] (bbn) -- (boutB);
+
+%% Fusion brace
+\begin{scope}[on background layer]
+  \node[draw=red, thick, dashed, rounded corners, fit=(bconv)(bbn)(brelu),
+        fill=red!10, label={[text=red, font=\small\bfseries]right:fused\\(erases BN)}] {};
+\end{scope}
+
+%% ===== AFTER section =====
+\node[font=\bfseries\large, text=green!60!black, right=5.5cm of btitle] (atitle) {AFTER (fixed)};
+
+\node[box, fill=blue!20,   below=0.6cm of atitle]  (aconv) {Conv};
+\node[box, fill=orange!25, below=of aconv]          (abn)   {BatchNorm};
+\node[box, fill=purple!20, below=of abn]             (arelu) {ReLU};
+\node[box, fill=green!20,  below=of arelu]           (aoutA) {Output A ✓};
+\node[box, fill=green!25,  right=2.2cm of abn]       (aoutB) {Output B ✓};
+
+\draw[arrow] (aconv) -- (abn);
+\draw[arrow] (abn)   -- (arelu);
+\draw[arrow] (arelu) -- (aoutA);
+\draw[arrow, green!60!black, thick] (abn) -- (aoutB);
+
+\node[font=\small, text=green!60!black, right=0.2cm of abn, yshift=0.5cm]
+     {2 consumers:\\fusion blocked};
+
+%% Title
+\node[font=\Large\bfseries, above=0.4cm of btitle, xshift=3cm]
+     {DNN Fusion Output Fix --- Issue \#17944};
+
+\end{tikzpicture}
+\end{document}
