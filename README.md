@@ -34,3 +34,48 @@ Please read the [contribution guidelines](https://github.com/opencv/opencv/wiki/
 * [Follow OpenCV on Mastodon](https://mastodon.social/@opencv) in the Fediverse
 * [Follow OpenCV on Twitter](https://twitter.com/opencvlive)
 * [OpenCV.ai](https://opencv.ai): Computer Vision and AI development services from the OpenCV team.
+
+---
+
+## Object Detection Documentation (Varun-AI-hub Fork)
+
+This fork includes a comprehensive object detection documentation and tutorial series covering classical and deep learning methods in OpenCV.
+
+### Documentation Branches
+
+| Branch | Description |
+|---|---|
+| `docs/object-detection-classical` | Template matching, Haar cascades, HOG+SVM, background subtraction, NMS |
+| `docs/object-detection-dnn` | YOLO, SSD, Faster R-CNN, EfficientDet via OpenCV DNN module |
+| `docs/object-detection-training` | Custom training overview, YOLOv8 ONNX export, evaluation metrics |
+| `docs/object-detection-slides` | 40-frame LaTeX Beamer presentation + master overview |
+| `docs/custom-training-yolov8` | End-to-end YOLOv8: dataset generation, training, ONNX export, OpenCV inference |
+| `docs/custom-training-classical` | HOG+SVM custom training with hard negative mining, Haar cascade workflow |
+| `docs/custom-training-pytorch-onnx` | PyTorch custom detector → ONNX → OpenCV DNN complete pipeline |
+
+### Key Files
+
+- `object_detection_docs/classical_methods.md` — Classical methods reference
+- `object_detection_docs/dnn_methods.md` — Deep learning methods reference
+- `object_detection_docs/custom_training.md` — Custom training guide
+- `object_detection_docs/overview.md` — Master index and method selection guide
+- `object_detection_docs/slides.tex` — LaTeX Beamer slides (compile with pdflatex)
+- `custom_training/yolov8/tutorial.md` — YOLOv8 step-by-step tutorial
+- `custom_training/classical/tutorial.md` — HOG+SVM step-by-step tutorial
+- `custom_training/pytorch_onnx/tutorial.md` — PyTorch → ONNX tutorial
+
+### Quick Start
+
+```python
+# Load and run any pretrained OpenCV detector in 5 lines
+import cv2
+net = cv2.dnn.readNetFromONNX("model.onnx")
+blob = cv2.dnn.blobFromImage(img, 1/255.0, (640, 640), swapRB=True)
+net.setInput(blob)
+outputs = net.forward(net.getUnconnectedOutLayersNames())
+```
+
+### Bug Fixes Included
+
+This fork also contains fixes for 19 OpenCV issues across modules: features, imgproc, dnn, ptcloud, stereo, geometry, videoio, and js.
+See branches prefixed with `fix/` for individual issue fixes with tests and documentation.
