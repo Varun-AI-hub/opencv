@@ -1,0 +1,321 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+
+\geometry{margin=1in}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+
+\lstset{basicstyle=\ttfamily\small, frame=single}
+
+\title{\textbf{Fisheye Lens Projection: Kannala-Brandt Model,\\
+Newton-Raphson Inversion, and NaN Analysis}\\
+\large Mathematical Documentation for OpenCV Issue \#23961}
+\author{OpenCV Fix Branch: \texttt{fix/issue-23961-fisheye-nan}}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%-----------------------------------------------------------------------
+\section{Introduction}
+
+OpenCV's \texttt{fisheye} module implements the Kannala-Brandt
+projection model for wide-angle and fisheye cameras.  The
+\emph{undistortion} step (mapping image pixels back to 3-D rays) requires
+inverting a polynomial projection function using Newton-Raphson
+iteration.
+
+Issue \#23961 discovered that for certain distortion coefficient
+combinations the Newton-Raphson iteration diverges, producing
+\texttt{NaN} or \texttt{Inf} values that propagate through subsequent
+computations.  This document derives the full mathematical basis of the
+projection model and the NaN generation mechanism, then presents the fix.
+
+%-----------------------------------------------------------------------
+\section{Kannala-Brandt Fisheye Projection Model}
+
+\subsection{Forward Projection}
+
+\begin{definition}[Incident Angle]
+For a 3-D world point $\mathbf{P} = (X, Y, Z)^\top$ with $Z > 0$,
+the \emph{incident angle} $\theta$ (angle from the optical axis) and
+the \emph{azimuth} $\phi$ are:
+\[
+  \theta = \arctan\!\left(\frac{\sqrt{X^2 + Y^2}}{Z}\right), \qquad
+  \phi   = \arctan\!\left(\frac{Y}{X}\right)
+\]
+\end{definition}
+
+\begin{definition}[Projected Radius — Kannala-Brandt]
+The projected radius is modelled as a polynomial in $\theta$ with only
+odd powers (symmetry about the optical axis):
+\[
+  r(\theta) = k_1\theta + k_3\theta^3 + k_5\theta^5 + k_7\theta^7
+              + k_9\theta^9
+\]
+The even-order coefficients vanish by rotational symmetry around the
+optical axis.
+\end{definition}
+
+\begin{definition}[Image Coordinates]
+The (undistorted, normalised) image coordinates are:
+\[
+  x = r(\theta)\cos\phi, \qquad y = r(\theta)\sin\phi
+\]
+After applying the camera intrinsic matrix $K$:
+\[
+  \begin{pmatrix} u \\ v \end{pmatrix} =
+  \begin{pmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \end{pmatrix}
+  \begin{pmatrix} x \\ y \\ 1 \end{pmatrix}
+\]
+\end{definition}
+
+\subsection{Properties of $r(\theta)$}
+
+For a physical fisheye lens, $r(\theta)$ must be monotonically
+increasing on $[0, \pi/2]$, so $r'(\theta) > 0$ on that interval.
+The derivative is:
+\[
+  r'(\theta) = k_1 + 3k_3\theta^2 + 5k_5\theta^4 + 7k_7\theta^6
+               + 9k_9\theta^8
+\]
+
+\begin{remark}
+For an idealised equidistant fisheye, $k_1 = 1$ and all higher-order
+coefficients are zero, giving $r(\theta) = \theta$ (radians = projected
+mm, assuming unit focal length).
+\end{remark}
+
+%-----------------------------------------------------------------------
+\section{Inverse Projection (Undistortion)}
+
+\subsection{Problem Formulation}
+
+Given an image point $(u, v)$, we first map to normalised coordinates:
+\[
+  x = (u - c_x)/f_x, \qquad y = (v - c_y)/f_y
+\]
+
+Then define $\rho = \sqrt{x^2 + y^2}$.  We seek $\theta$ such that:
+\[
+  r(\theta) = \rho \quad \Longleftrightarrow \quad
+  f(\theta) \;=\; r(\theta) - \rho \;=\; 0
+\]
+
+Once $\theta$ is found, the 3-D direction is:
+\[
+  \mathbf{d} = \bigl(\sin\theta\cos\phi,\; \sin\theta\sin\phi,\; \cos\theta\bigr)^\top
+\]
+
+\subsection{Newton-Raphson Iteration}
+
+\begin{definition}[Newton-Raphson Update]
+Starting from $\theta_0 = \rho / k_1$ (linear approximation), iterate:
+\[
+  \theta_{n+1} = \theta_n - \frac{f(\theta_n)}{f'(\theta_n)}
+               = \theta_n - \frac{r(\theta_n) - \rho}{r'(\theta_n)}
+\]
+\end{definition}
+
+\begin{theorem}[Quadratic Convergence Near Root]
+Let $\theta^*$ be a simple root of $f$ (i.e., $f(\theta^*) = 0$ and
+$f'(\theta^*) \neq 0$).  Then Newton-Raphson converges quadratically
+in a neighbourhood of $\theta^*$:
+\[
+  |\theta_{n+1} - \theta^*| \leq C |\theta_n - \theta^*|^2
+\]
+for $C = |f''(\theta^*)| / (2 |f'(\theta^*)|)$.
+\end{theorem}
+
+%-----------------------------------------------------------------------
+\section{NaN Generation: The Zero-Derivative Singularity}
+
+\subsection{When Does $r'(\theta) = 0$?}
+
+The derivative vanishes when:
+\[
+  k_1 + 3k_3\theta^2 + 5k_5\theta^4 + 7k_7\theta^6 + 9k_9\theta^8 = 0
+\]
+
+\begin{lemma}[Concrete Example]
+For $k_1 = 1$, $k_3 = -1/3$, $k_5 = k_7 = k_9 = 0$:
+\[
+  r'(\theta) = 1 - \theta^2 = 0 \implies \theta = 1\;\text{rad}
+\]
+At this point the Newton-Raphson update is:
+\[
+  \theta_{n+1} = \theta_n - \frac{r(\theta_n) - \rho}{0}
+  = \pm\infty
+\]
+\end{lemma}
+
+\subsection{Propagation to NaN}
+
+\begin{enumerate}
+  \item $r'(\theta_n) \approx 0 \Rightarrow \theta_{n+1} \to \pm\infty$
+  \item $r(\pm\infty) = k_1(\pm\infty) + k_3(\pm\infty)^3 + \ldots = \pm\infty$
+  \item $f(\pm\infty) = \pm\infty - \rho = \pm\infty$
+  \item Next step: $\frac{\pm\infty}{\pm\infty}$ is IEEE 754 NaN
+  \item NaN propagates through all subsequent arithmetic
+\end{enumerate}
+
+\noindent\textbf{IEEE 754 rule:} any arithmetic operation involving NaN
+returns NaN.  Thus NaN in $\theta$ $\Rightarrow$ NaN in $(x, y)$
+$\Rightarrow$ NaN in $\mathbf{d}$ $\Rightarrow$ NaN propagates to all
+downstream computations (reprojection, pose estimation, etc.).
+
+\subsection{Edge Case: $\theta \to 0$}
+
+When $\rho = 0$ (image centre), the initial step involves:
+\[
+  \lim_{\theta \to 0} \frac{r(\theta)}{\theta} = k_1
+\]
+by L'H\^opital's rule.  Direct evaluation yields $0/0$, which is NaN.
+The fix initialises $\theta_0 = 0$ and uses $\text{scale} = k_1$ at
+the origin.
+
+%-----------------------------------------------------------------------
+\section{Fix: Zero-Derivative Guard}
+
+\subsection{Guard Condition}
+
+\begin{lstlisting}
+const double eps = 1e-8;
+for (int i = 0; i < max_iters; ++i) {
+    double f  = poly_eval(theta) - rho;      // r(theta) - rho
+    double fp = dpoly_eval(theta);            // r'(theta)
+    if (std::abs(fp) < eps) break;           // GUARD: flat tangent
+    theta -= f / fp;
+}
+// Post-filter: check finiteness
+if (!std::isfinite(theta)) {
+    // output (0, 0, 0) or handle gracefully
+}
+\end{lstlisting}
+
+\subsection{Mathematical Justification}
+
+When $|r'(\theta_n)| < \varepsilon$, the linear model
+$r(\theta) \approx r(\theta_n) + r'(\theta_n)(\theta - \theta_n)$ is
+degenerate.  The Newton step carries no meaningful correction of order
+$\varepsilon / |r'(\theta_n)|$, so it is better to halt iteration and
+use the current estimate $\theta_n$ than to diverge.
+
+The absolute error at halt is bounded by:
+\[
+  |f(\theta_n)| = |r(\theta_n) - \rho| \leq \text{(residual at last step)}
+\]
+which is typically small after several iterations.
+
+%-----------------------------------------------------------------------
+\section{TikZ Figures}
+
+\subsection{Figure 1: Fisheye Lens Cross-Section}
+
+\begin{center}
+\begin{tikzpicture}[scale=1.2]
+% Optical axis
+\draw[->] (-0.5,0) -- (5.5,0) node[right]{optical axis $Z$};
+
+% Lens element (simplified)
+\draw[thick, blue!60] (2,-1.2) .. controls (2.3,-0.5) and (2.3,0.5) .. (2,1.2);
+\node[blue!60, above] at (2, 1.3) {lens};
+
+% Incoming ray at angle theta
+\draw[->, thick, red] (0,1.8) -- (2.15, 0.35);
+\draw[dashed, gray] (0,0) -- (0, 2) node[above, gray]{\small world point};
+
+% Angle theta arc
+\draw[->] (0.8, 0) arc (0:50:0.8) node[midway, right, font=\small]{$\theta$};
+
+% Projected ray
+\draw[->, thick, green!70!black] (2.15, 0.35) -- (4.5, 0.35)
+  node[right]{\small image plane};
+\draw[dashed] (4.5, -0.5) -- (4.5, 0.8);
+\draw[<->] (2.15, -0.4) -- (4.5, -0.4) node[midway, below]{\small $r(\theta)$};
+
+% Incident angle label
+\draw[dashed, gray!60] (2, 0) -- (0, 1.8);
+
+% Labels
+\node[below] at (0, -0.15) {$O$};
+\fill (0,0) circle (1.5pt);
+\end{tikzpicture}
+\end{center}
+
+\subsection{Figure 2: Newton-Raphson Divergence at Flat Tangent}
+
+\begin{center}
+\begin{tikzpicture}[scale=1.5]
+\begin{axis}[
+  xlabel={$\theta$},
+  ylabel={$f(\theta) = r(\theta) - \rho$},
+  xmin=0.4, xmax=2.2, ymin=-1.2, ymax=0.6,
+  grid=major, grid style={dashed, gray!40},
+  width=8cm, height=6cm,
+  xtick={0.5, 1.0, 1.5, 2.0},
+  legend pos=south east,
+  title={$f(\theta)$ with $k_1=1, k_3=-1/3, \rho=0.7$}
+]
+% f(theta) = theta - theta^3/3 - 0.7
+\addplot[blue, thick, domain=0.4:2.0, samples=100]
+  {x - x^3/3 - 0.7};
+\addlegendentry{$f(\theta)$}
+
+% Tangent at theta=1 (flat): f(1)=1-1/3-0.7=-0.033, f'(1)=0
+% Tangent is horizontal line through (1, f(1))
+\addplot[red, dashed, thick, domain=0.4:2.0]
+  {1 - 1/3 - 0.7};
+\addlegendentry{tangent at $\theta=1$ (flat)}
+
+% Mark theta_n = 1.0
+\addplot[only marks, mark=*, mark size=2.5pt, red]
+  coordinates {(1.0, 0.667-0.7)};
+\node[above right, font=\small] at (axis cs:1.0, -0.033) {$\theta_n=1$};
+
+% Actual root approx
+\addplot[only marks, mark=x, mark size=3pt, green!70!black]
+  coordinates {(0.76, 0)};
+\node[below, font=\small, green!70!black] at (axis cs:0.76, 0) {$\theta^*$};
+\end{axis}
+\end{tikzpicture}
+\end{center}
+
+\noindent At $\theta_n = 1$, the tangent is horizontal ($r'(1)=0$), so
+the Newton step $\theta_{n+1} = 1 - f(1)/0$ diverges to $\pm\infty$.
+
+%-----------------------------------------------------------------------
+\section{References}
+
+\begin{enumerate}
+  \item J.\ Kannala and S.\ S.\ Brandt.
+        ``A generic camera model and calibration method for conventional,
+        wide-angle, and fish-eye lenses.''
+        \emph{IEEE Transactions on Pattern Analysis and Machine Intelligence},
+        28(8):1335--1340, 2006.
+  \item OpenCV Documentation: fisheye module.
+        \url{https://docs.opencv.org/4.x/db/d58/group__calib3d__fisheye.html}
+  \item W.\ H.\ Press, S.\ A.\ Teukolsky, W.\ T.\ Vetterling, and
+        B.\ P.\ Flannery.
+        \emph{Numerical Recipes: The Art of Scientific Computing},
+        3rd ed., Ch.\ 9 (Root Finding).
+        Cambridge University Press, 2007.
+  \item IEEE Standard 754-2019 for Floating-Point Arithmetic.
+\end{enumerate}
+
+\end{document}
