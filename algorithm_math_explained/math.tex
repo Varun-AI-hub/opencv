@@ -1,0 +1,333 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+
+\geometry{margin=1in}
+
+\lstset{
+  language=C++,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!50!black},
+  stringstyle=\color{red!70!black},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny\color{gray}
+}
+
+\title{\textbf{SIMD Type Aliasing on ppc64le: Full Mathematical and Systems Exposition}\\
+\large Strict Aliasing, Undefined Behaviour, and the \texttt{memcpy}-based Type Pun}
+\author{OpenCV Project --- Algorithm Documentation}
+\date{2024}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{SIMD Vector Register Fundamentals}
+%----------------------------------------------------------------------
+
+\subsection{POWER VSX 128-bit Vector Registers}
+
+The POWER Vector Scalar Extension (VSX) architecture provides 64 architectural
+vector registers, each exactly 128 bits wide.  A single register $\mathbf{v}$
+stores $n = 128 / w$ \emph{lanes}, where $w$ is the bit-width of each element:
+
+\begin{equation}
+\mathbf{v}_{128} = [v_0,\, v_1,\, \ldots,\, v_{n-1}], \quad
+n = \frac{128}{w}, \quad w \in \{8, 16, 32, 64\}.
+\label{eq:lanes}
+\end{equation}
+
+Common type mappings for AltiVec/VSX intrinsics are shown in Table~\ref{tab:types}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccl}
+\hline
+\textbf{C type} & $w$ (bits) & $n$ lanes & \textbf{Intrinsic name} \\
+\hline
+\texttt{unsigned char}  & 8  & 16 & \texttt{vector unsigned char} / \texttt{v16u8} \\
+\texttt{unsigned short} & 16 &  8 & \texttt{vector unsigned short} / \texttt{v8u16} \\
+\texttt{unsigned int}   & 32 &  4 & \texttt{vector unsigned int} / \texttt{v4u32} \\
+\texttt{unsigned long long} & 64 & 2 & \texttt{vector unsigned long long} / \texttt{v2u64} \\
+\texttt{float}          & 32 &  4 & \texttt{vector float} / \texttt{v4f32} \\
+\texttt{double}         & 64 &  2 & \texttt{vector double} / \texttt{v2f64} \\
+\hline
+\end{tabular}
+\caption{AltiVec/VSX vector types and their lane structure.  The same 128 hardware
+bits are interpreted differently according to the declared C type.}
+\label{tab:types}
+\end{table}
+
+\subsection{Reinterpretation Mathematics}
+
+Reinterpreting the same 128-bit value as a different lane width is a pure
+\emph{bit-pattern identity}:
+\begin{equation}
+\text{bits}(\mathbf{v}_{\text{v4u32}}) \equiv \text{bits}(\mathbf{v}_{\text{v8u16}}),
+\label{eq:bitidentity}
+\end{equation}
+i.e.\ the integer stored in hardware is unchanged; only the software type
+annotation changes.  Mathematically, if the 128-bit word is $W \in \{0,\ldots,2^{128}-1\}$:
+\begin{align}
+v_i^{(32)} &= \bigl\lfloor W / 2^{32(3-i)} \bigr\rfloor \bmod 2^{32},
+\quad i = 0,1,2,3, \label{eq:lanes32}\\
+v_j^{(16)} &= \bigl\lfloor W / 2^{16(7-j)} \bigr\rfloor \bmod 2^{16},
+\quad j = 0,\ldots,7. \label{eq:lanes16}
+\end{align}
+These two views are consistent: $v_i^{(32)} = v_{2i}^{(16)} \cdot 2^{16} + v_{2i+1}^{(16)}$
+(big-endian ordering on POWER).
+
+%----------------------------------------------------------------------
+\section{C++ Strict Aliasing Rule}
+%----------------------------------------------------------------------
+
+\subsection{Statement of the Rule}
+
+The ISO C++ standard (C++17 \S{}\,6.10) states that an object of type $T$ shall
+only be accessed through a glvalue of a compatible type.  The set of compatible
+types for $T$ includes: $T$ itself, a type that is cv-qualified $T$, a base class
+of $T$, \texttt{char}, \texttt{unsigned char}, or \texttt{std::byte}.
+
+\begin{definition}[Type Aliasing Violation]
+Accessing object $x$ of type $T$ via a pointer of unrelated type $S^* \neq T^*$
+(with $S \notin \{\text{char}, \text{unsigned char}, \text{std::byte}\}$)
+constitutes \emph{undefined behaviour} (UB).
+\end{definition}
+
+\subsection{Compiler Exploitation}
+
+A standards-compliant optimiser may assume that pointers to incompatible types
+never alias.  Concretely, GCC with \texttt{-O2} and the VSX type cast:
+\begin{lstlisting}
+__vector unsigned int a = ...;
+__vector unsigned short b = (__vector unsigned short)a;  // C-style cast
+// GCC may reorder loads/stores across this, yielding wrong results
+\end{lstlisting}
+Here GCC historically emitted a warning:
+\begin{verbatim}
+warning: conversion between incompatible vector types [-Wcast-function-type]
+\end{verbatim}
+and in some versions produced silently wrong code when aliased registers were
+cached in different pipeline stages.
+
+\subsection{Three Type-Punning Strategies}
+
+\begin{enumerate}
+\item \textbf{Pointer cast} (UB):
+\[
+b = *\text{reinterpret\_cast<}\texttt{v8u16}^*\text{>}(\&a).
+\]
+The standard makes this UB for non-char types.
+
+\item \textbf{Union pun} (UB in C++, implementation-defined in C):
+\begin{lstlisting}
+union { v4u32 a; v8u16 b; } u;
+u.a = val;
+use(u.b);  // UB in C++: writing one member, reading another
+\end{lstlisting}
+
+\item \textbf{\texttt{memcpy}} (defined behaviour):
+\[
+\texttt{memcpy}(\&b, \&a, \text{sizeof}(a)) \Rightarrow b \text{ holds } W \text{ bits of } a.
+\]
+\texttt{memcpy} operates on \texttt{unsigned char} (permitted type), so no aliasing
+violation occurs.  Eq.~\eqref{eq:bitidentity} is realised without UB.
+\end{enumerate}
+
+%----------------------------------------------------------------------
+\section{The \texttt{\_\_builtin\_memcpy} Fix}
+%----------------------------------------------------------------------
+
+\subsection{Semantic Guarantee}
+
+The C and C++ standards define \texttt{memcpy} to copy the object representation
+(bit pattern) of $n$ bytes from source to destination.  Because it operates on
+bytes (\texttt{unsigned char}), it is explicitly permitted to alias any type.
+Therefore the resulting value $b$ satisfies Eq.~\eqref{eq:bitidentity} by definition.
+
+\subsection{Zero Runtime Cost}
+
+GCC and Clang recognise \texttt{memcpy} (and \texttt{\_\_builtin\_memcpy}) of small
+constant-size objects and lower them to a single register move or zero instructions
+(in-register move) during the middle-end.  Specifically for 16-byte VSX vectors:
+
+\[
+\texttt{\_\_builtin\_memcpy}(\&b, \&a, 16)
+\;\xrightarrow{\text{GCC IR}}\;
+b := a \text{ (same register, different type annotation)}.
+\]
+
+\subsection{Template Wrapper}
+
+The canonical fix used in OpenCV's \texttt{intrin\_vsx.hpp}:
+\begin{lstlisting}
+template<typename To, typename From>
+inline To vsx_reinterpret_as(From v) {
+    To r;
+    __builtin_memcpy(&r, &v, sizeof(v));  // 0 runtime cost; defined behaviour
+    return r;
+}
+\end{lstlisting}
+
+Usage:
+\begin{lstlisting}
+v4u32 a = vec_splats(0xDEADBEEFu);
+v8u16 b = vsx_reinterpret_as<v8u16>(a);  // safe, no UB
+\end{lstlisting}
+
+%----------------------------------------------------------------------
+\section{AltiVec/VSX Type System Semantics}
+%----------------------------------------------------------------------
+
+\subsection{Conversion Semantics}
+
+The AltiVec ABI specifies that vector type conversions must preserve the 128-bit
+value.  The hardware instruction \texttt{xxlor} (VSX logical OR) can copy a vector
+register unchanged; the assembler type annotation changes but no instruction is emitted.
+
+\begin{theorem}[Equivalence of memcpy and no-op reinterpret]
+For any 128-bit VSX register value $W$ and any two AltiVec vector types
+$T_1, T_2$ of the same size, \texttt{vsx\_reinterpret\_as<$T_2$>($x$)} where
+$x$ has type $T_1$ and holds $W$ returns a value of type $T_2$ whose bit pattern
+equals $W$.
+\end{theorem}
+\begin{proof}
+By the C++ standard, \texttt{memcpy} of $\text{sizeof}(T_1) = \text{sizeof}(T_2) = 16$
+bytes copies the object representation exactly.  GCC's internal representation of VSX
+vectors tracks the 128-bit word; the \texttt{LTO/O2} pass maps the \texttt{memcpy}
+to a register pseudo-copy, preserving $W$.  \qed
+\end{proof}
+
+\subsection{GCC Deprecation History}
+
+GCC versions prior to 6.0 accepted C-style casts between incompatible vector types
+as an extension.  Starting with GCC 8.0, \texttt{-Wcast-function-type} and
+\texttt{-Werror} in OpenCV's CMake configuration turned this into a build error on
+\texttt{ppc64le} (issue \#23861).  The \texttt{memcpy} idiom is the ABI-stable,
+warning-free, standard-conforming solution.
+
+%----------------------------------------------------------------------
+\section{TikZ Figures}
+%----------------------------------------------------------------------
+
+\subsection{Figure 1: 128-bit Register Dual Interpretation}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, minimum height=0.7cm, font=\scriptsize, text centered},
+  arrow/.style={-{Stealth}, thick}
+]
+% Register label
+\node[font=\small\bfseries] at (-0.5, 1.8) {128-bit VSX register $W$};
+
+% v4u32 interpretation (top)
+\node[font=\scriptsize, left] at (0, 1.2) {\texttt{v4u32}:};
+\foreach \i/\label in {0/$v_0^{(32)}$, 1/$v_1^{(32)}$, 2/$v_2^{(32)}$, 3/$v_3^{(32)}$}
+  \node[box, minimum width=2cm, fill=blue!15] at (1 + \i*2, 1.2) {\label};
+
+% v8u16 interpretation (bottom)
+\node[font=\scriptsize, left] at (0, 0) {\texttt{v8u16}:};
+\foreach \i in {0,...,7}
+  \node[box, minimum width=1cm, fill=orange!25] at (0.5 + \i*1, 0) {$v_{\i}^{(16)}$};
+
+% Braces showing correspondence
+\draw[decorate, decoration={brace, amplitude=4pt, mirror},
+      blue!60] (0.0, -0.4) -- (2.0, -0.4)
+      node[midway, below=5pt, font=\tiny]{$v_0^{(32)}$};
+\draw[decorate, decoration={brace, amplitude=4pt, mirror},
+      blue!60] (2.0, -0.4) -- (4.0, -0.4)
+      node[midway, below=5pt, font=\tiny]{$v_1^{(32)}$};
+
+% Same bits annotation
+\node[draw, dashed, fill=gray!5, font=\small] at (4, -1.4)
+    {Same 128 bits --- different type annotation};
+\end{tikzpicture}
+\caption{A 128-bit VSX register viewed as 4 lanes of 32-bit (\texttt{v4u32}, top)
+vs.\ 8 lanes of 16-bit (\texttt{v8u16}, bottom).  Pairs of 16-bit lanes pack into
+one 32-bit lane per Eqs.~\eqref{eq:lanes32}--\eqref{eq:lanes16}.}
+\label{fig:register}
+\end{figure}
+
+\subsection{Figure 2: Safe vs.\ Unsafe Reinterpretation Paths}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  node distance=1cm and 1.5cm,
+  box/.style={rectangle, draw, rounded corners, minimum width=2.5cm,
+              minimum height=0.7cm, font=\small, text centered},
+  arrow/.style={-{Stealth}, very thick}
+]
+\node[box, fill=blue!10]  (src)  {\texttt{v4u32 a}};
+
+% Bad path
+\node[box, fill=red!20, below left=1.2cm and 1.5cm of src] (cast)
+    {C-style cast\\(\texttt{v8u16})a};
+\node[box, fill=red!20, below=1cm of cast] (ub)
+    {\textbf{UB} in C++};
+
+\draw[arrow, red!70!black] (src.south west) -- (cast.north)
+    node[midway, left, font=\small]{wrong};
+\draw[arrow, red!70!black] (cast) -- (ub);
+
+% Good path
+\node[box, fill=green!20, below right=1.2cm and 1.5cm of src] (mc)
+    {\texttt{\_\_builtin\_memcpy}\\16 bytes};
+\node[box, fill=green!20, below=1cm of mc] (safe)
+    {Defined behaviour\\zero-cost register move};
+
+\draw[arrow, green!50!black] (src.south east) -- (mc.north)
+    node[midway, right, font=\small]{correct};
+\draw[arrow, green!50!black] (mc) -- (safe);
+\end{tikzpicture}
+\caption{Old unsafe cast path (left, red) vs.\ \texttt{memcpy}-based reinterpretation
+(right, green).  Both produce the same machine code at \texttt{-O2}, but only the
+\texttt{memcpy} path is defined by the C++ standard.}
+\label{fig:paths}
+\end{figure}
+
+%----------------------------------------------------------------------
+\section*{References}
+%----------------------------------------------------------------------
+\begin{thebibliography}{9}
+
+\bibitem{cplusplus17}
+ISO/IEC, \textit{Programming Languages --- C++}, ISO/IEC 14882:2017,
+\S{}6.10 ``Basic lvalue-to-rvalue conversions and type aliasing''.
+
+\bibitem{gcc_altivec}
+GCC Project, \textit{GCC AltiVec Programming Interface Manual},
+\url{https://gcc.gnu.org/onlinedocs/gcc/PowerPC-AltiVec-Built-in-Functions.html}, 2024.
+
+\bibitem{power_isa}
+IBM, \textit{Power Instruction Set Architecture}, Version 3.1,
+Chapter 6: Vector Scalar Extension (VSX), 2020.
+
+\bibitem{opencv_issue}
+OpenCV Project, Issue \#23861: \textit{ppc64le build warning: conversion between
+incompatible vector types},
+\url{https://github.com/opencv/opencv/issues/23861}, 2023.
+
+\end{thebibliography}
+
+\end{document}
