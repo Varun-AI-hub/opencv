@@ -1,0 +1,50 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  node distance=1.2cm and 1.6cm,
+  box/.style={rectangle, rounded corners=4pt, minimum width=3.6cm, minimum height=0.9cm,
+              text centered, draw=black, font=\small},
+  arrow/.style={-Stealth, thick},
+  label/.style={font=\footnotesize\itshape}
+]
+
+%% --- ONNX file outer box ---
+\node[box, fill=gray!10, minimum width=8cm, minimum height=4.5cm] (onnx) {};
+\node[font=\bfseries, above] at (onnx.north) {model.onnx};
+
+%% --- Graph sub-box ---
+\node[box, fill=blue!15, minimum width=3.2cm, minimum height=1.4cm,
+      above left=0.4cm and 0.5cm of onnx.center] (graph)
+      {Graph\\(weights, layers, ops)};
+
+%% --- metadata_props sub-box ---
+\node[box, fill=yellow!30, minimum width=3.2cm, minimum height=2.2cm,
+      above right=0.4cm and -1.6cm of onnx.center] (meta)
+      {metadata\_props\\[4pt]
+       \texttt{author = "OpenCV"}\\
+       \texttt{classes = "cat,dog"}\\
+       \texttt{version = "1.3"}};
+
+%% --- API box (outside onnx) ---
+\node[box, fill=green!25, below=1.6cm of onnx.south, minimum width=5cm] (api)
+      {\texttt{net.getMetaData(key)}};
+
+%% --- Arrow from metadata to API ---
+\draw[arrow, green!60!black, very thick]
+      (meta.south) -- ++(0,-0.5) -- ++(0,-1.2) node[midway, right, font=\small\bfseries, text=green!60!black] {NEW API} -- (api.north);
+
+%% --- Return values ---
+\node[box, fill=green!10, right=1.8cm of api, minimum width=3.2cm] (ret)
+      {\texttt{"OpenCV"}\\
+       \texttt{"cat,dog"}\\
+       \texttt{"1.3"}};
+\draw[arrow] (api) -- (ret);
+
+%% --- Title ---
+\node[font=\large\bfseries, above=0.6cm of onnx.north] {ONNX Metadata API --- Feature \#23277};
+
+\end{tikzpicture}
+\end{document}
