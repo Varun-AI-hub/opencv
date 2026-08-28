@@ -1,0 +1,113 @@
+\documentclass{standalone}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit}
+
+\begin{document}
+\begin{tikzpicture}[
+  chan/.style={rectangle, minimum width=0.85cm, minimum height=0.85cm,
+               draw=black, font=\footnotesize\bfseries, text centered},
+  box/.style={rectangle, rounded corners=3pt, minimum width=2.6cm, minimum height=0.85cm,
+              draw=black, font=\small\bfseries, text centered},
+  arrow/.style={-{Stealth[length=5pt]}, thick},
+  ok/.style={font=\small\bfseries, text=green!40!black},
+  bad/.style={font=\small\bfseries, text=red!70!black},
+  note/.style={font=\footnotesize\itshape, text=gray},
+]
+
+% ===== Title =====
+\node[font=\large\bfseries] at (5.5, 1.5)
+  {OpenCV.js Edge Detection: Channel Order Bug};
+
+% =============================================
+% ROW 1: Working case (RGBA from <img> tag)
+% =============================================
+\node[font=\small\bfseries] at (-1.0, 0.0) {Working};
+\node[note] at (-1.0, -0.35) {(\texttt{<img>} tag)};
+
+% Input channels
+\node[chan, fill=red!60]   (r1) at (0.5,  0.0)  {R};
+\node[chan, fill=green!50] (g1) at (1.35, 0.0)  {G};
+\node[chan, fill=blue!50]  (b1) at (2.2,  0.0)  {B};
+\node[chan, fill=gray!30]  (a1) at (3.05, 0.0)  {A};
+\node[font=\tiny, gray] at (1.75, -0.55) {RGBA order};
+
+% Formula box
+\node[box, fill=yellow!30] (f1) at (5.5, 0.0)
+  {\shortstack{$0.299 \cdot R$\\$+\, 0.587 \cdot G$\\$+\, 0.114 \cdot B$}};
+
+% Output
+\node[box, fill=green!30] (o1) at (8.5, 0.0) {Correct Edges};
+\node[ok] at (9.95, 0.0) {\Large\checkmark};
+
+\draw[arrow] (3.4, 0.0) -- node[above,font=\tiny]{pixel data} (f1.west);
+\draw[arrow] (f1.east) -- (o1.west);
+
+% =============================================
+% Row divider
+% =============================================
+\draw[dashed, gray!50, thick] (-1.8, -1.1) -- (10.5, -1.1);
+
+% =============================================
+% ROW 2: Broken case (BGRA from File/Buffer, old code)
+% =============================================
+\node[font=\small\bfseries] at (-1.0, -1.9) {Broken};
+\node[note] at (-1.0, -2.25) {(File/Buffer,};
+\node[note] at (-1.0, -2.6)  {old code)};
+
+\node[chan, fill=blue!50]  (b2) at (0.5,  -2.0) {B};
+\node[chan, fill=green!50] (g2) at (1.35, -2.0) {G};
+\node[chan, fill=red!60]   (r2) at (2.2,  -2.0) {R};
+\node[chan, fill=gray!30]  (a2) at (3.05, -2.0) {A};
+\node[font=\tiny, gray] at (1.75, -2.55) {BGRA order};
+
+\node[box, fill=yellow!30] (f2) at (5.5, -2.0)
+  {\shortstack{$0.299 \cdot \mathbf{B}$\\$+\, 0.587 \cdot G$\\$+\, 0.114 \cdot \mathbf{R}$}};
+
+\node[box, fill=red!20]  (o2) at (8.5, -2.0) {Blank / Wrong};
+\node[bad] at (10.0, -2.0) {\Large$\times$};
+
+\draw[arrow] (3.4, -2.0) -- node[above,font=\tiny]{pixel data} (f2.west);
+\draw[arrow] (f2.east) -- (o2.west);
+
+% Annotation: formula reads B as R
+\node[bad, font=\tiny, text width=2.5cm, align=center] at (5.5, -3.0)
+  {Code reads B as R,\\ R as B — wrong weights!};
+
+% =============================================
+% ROW 3: Fixed case (BGRA converted to RGBA)
+% =============================================
+\draw[dashed, gray!50, thick] (-1.8, -3.4) -- (10.5, -3.4);
+
+\node[font=\small\bfseries] at (-1.0, -4.2) {Fixed};
+\node[note] at (-1.0, -4.55) {(File/Buffer,};
+\node[note] at (-1.0, -4.9)  {new code)};
+
+\node[chan, fill=blue!50]  (b3) at (0.5,  -4.3) {B};
+\node[chan, fill=green!50] (g3) at (1.35, -4.3) {G};
+\node[chan, fill=red!60]   (r3) at (2.2,  -4.3) {R};
+\node[chan, fill=gray!30]  (a3) at (3.05, -4.3) {A};
+\node[font=\tiny, gray] at (1.75, -4.85) {BGRA order};
+
+% Convert step
+\node[box, fill=orange!30, minimum width=2.0cm] (conv) at (5.0, -4.3) {BGRA$\to$RGBA};
+
+\node[chan, fill=red!60]   (r3b) at (7.2,  -4.3) {R};
+\node[chan, fill=green!50] (g3b) at (8.05, -4.3) {G};
+\node[chan, fill=blue!50]  (b3b) at (8.9,  -4.3) {B};
+\node[chan, fill=gray!30]  (a3b) at (9.75, -4.3) {A};
+
+\draw[arrow] (3.4, -4.3) -- (conv.west);
+\draw[arrow] (conv.east) -- (6.8, -4.3);
+
+\node[ok] at (5.0, -5.2) {channels reordered correctly};
+
+% =============================================
+% Caption
+% =============================================
+\node[font=\footnotesize\itshape, text width=11cm, align=center] at (5.0, -6.1)
+  {The channel order (RGBA vs BGRA) differs depending on how the image is loaded.
+   The bug applied an RGBA grayscale formula to BGRA data, producing wrong results.
+   The fix converts the channel order before applying the formula.};
+
+\end{tikzpicture}
+\end{document}
