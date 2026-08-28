@@ -1,0 +1,96 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.symbols,shapes.geometric,fit}
+
+\begin{document}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners, minimum width=2.8cm, minimum height=1.0cm,
+              align=center, font=\small},
+  imgbox/.style={draw, minimum size=0.45cm, inner sep=0, font=\tiny},
+  arrow/.style={-{Stealth}, thick},
+  font=\small
+]
+
+%% ===== TOP ROW: BEFORE FIX =====
+\node[font=\bfseries\large, red] at (4, 7.5) {BEFORE FIX};
+
+% Source image (5x5)
+\node[above] at (0.9, 6.8) {\footnotesize Source Image};
+\foreach \r/\v in {0/0,1/0,2/1,3/0,4/0} {
+  \foreach \c/\u in {0/0,1/0,2/1,3/0,4/0} {
+    \pgfmathparse{(\r==2 && \c==2) ? 1 : 0}
+    \ifnum\pgfmathresult=1
+      \node[imgbox, fill=yellow!80] at (\c*0.45, \r*0.45+5.6) {};
+    \else
+      \node[imgbox, fill=gray!20] at (\c*0.45, \r*0.45+5.6) {};
+    \fi
+  }
+}
+
+% Arrow to dilate
+\draw[arrow] (2.2, 6.5) -- (3.5, 6.5);
+
+% cv::dilate box
+\node[box, fill=blue!10] (dilate1) at (5.0, 6.5) {cv::dilate()};
+
+% CV_Bool kernel label arrives
+\node[box, fill=orange!20, draw=orange] (boolkernel) at (5.0, 5.0)
+  {CV\_Bool kernel\\{\footnotesize T F T / F T F / T F T}};
+\draw[arrow, orange] (boolkernel) -- (dilate1);
+
+% CRASH symbol
+\node[starburst, draw=red, fill=red!20, minimum width=2.2cm,
+      font=\bfseries, align=center, text=red] at (7.5, 6.5)
+  {CRASH!\\{\footnotesize unsupported\\type}};
+\draw[arrow, red, dashed] (dilate1) -- (7.5, 6.5);
+
+%% ===== BOTTOM ROW: AFTER FIX =====
+\node[font=\bfseries\large, green!60!black] at (4, 3.8) {AFTER FIX};
+
+% Source image again
+\node[above] at (0.9, 3.0) {\footnotesize Source Image};
+\foreach \r in {0,1,2,3,4} {
+  \foreach \c in {0,1,2,3,4} {
+    \pgfmathparse{(\r==2 && \c==2) ? 1 : 0}
+    \ifnum\pgfmathresult=1
+      \node[imgbox, fill=yellow!80] at (\c*0.45, \r*0.45+1.8) {};
+    \else
+      \node[imgbox, fill=gray!20] at (\c*0.45, \r*0.45+1.8) {};
+    \fi
+  }
+}
+
+\draw[arrow] (2.2, 2.7) -- (3.5, 2.7);
+
+% cv::dilate box
+\node[box, fill=blue!10] (dilate2) at (5.0, 2.7) {cv::dilate()\\{\tiny auto-converts\\CV\_Bool to CV\_8U}};
+
+% CV_Bool kernel
+\node[box, fill=orange!20, draw=orange] (boolkernel2) at (5.0, 1.1)
+  {CV\_Bool kernel};
+\draw[arrow, orange] (boolkernel2) -- (dilate2);
+
+% Conversion box
+\node[box, fill=green!10, draw=green!60!black] (conv) at (7.8, 2.7)
+  {CV\_8U kernel\\{\footnotesize 255 0 255\\0 255 0\\255 0 255}};
+\draw[arrow, green!60!black] (dilate2) -- (conv)
+  node[midway, above, font=\tiny] {convert};
+
+% Output (dilated)
+\node[above] at (10.8, 3.0) {\footnotesize Dilated Output};
+\foreach \r in {0,1,2,3,4} {
+  \foreach \c in {0,1,2,3,4} {
+    \pgfmathparse{((\r>=1 && \r<=3 && \c==2) || (\r==2 && \c>=1 && \c<=3)) ? 1 : 0}
+    \ifnum\pgfmathresult=1
+      \node[imgbox, fill=yellow!80] at (10.0 + \c*0.45, \r*0.45+1.8) {};
+    \else
+      \node[imgbox, fill=gray!20] at (10.0 + \c*0.45, \r*0.45+1.8) {};
+    \fi
+  }
+}
+\draw[arrow] (conv) -- (9.9, 2.7);
+
+\node[green!60!black, font=\bfseries] at (11.0, 0.9) {OK};
+
+\end{tikzpicture}
+\end{document}
