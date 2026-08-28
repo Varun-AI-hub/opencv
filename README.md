@@ -34,3 +34,23 @@ Please read the [contribution guidelines](https://github.com/opencv/opencv/wiki/
 * [Follow OpenCV on Mastodon](https://mastodon.social/@opencv) in the Fediverse
 * [Follow OpenCV on Twitter](https://twitter.com/opencvlive)
 * [OpenCV.ai](https://opencv.ai): Computer Vision and AI development services from the OpenCV team.
+
+---
+
+## Object Detection Documentation (Varun-AI-hub Fork)
+
+This fork includes a comprehensive object detection documentation and tutorial series. See these branches:
+
+| Branch | Description |
+|---|---|
+| `docs/object-detection-classical` | Template matching, Haar cascades, HOG+SVM, background subtraction |
+| `docs/object-detection-dnn` | YOLO, SSD, Faster R-CNN via OpenCV DNN |
+| `docs/object-detection-training` | Custom training, YOLOv8 ONNX export, evaluation |
+| `docs/object-detection-slides` | LaTeX Beamer slides (40 frames) |
+| `docs/custom-training-yolov8` | YOLOv8 end-to-end: dataset → train → ONNX → OpenCV |
+| `docs/custom-training-classical` | HOG+SVM with hard negative mining |
+| `docs/custom-training-pytorch-onnx` | PyTorch → ONNX → OpenCV DNN pipeline |
+
+### This Branch
+
+This branch contains a bug fix for an OpenCV issue. See the `dumbdown/` folder for a plain-English explanation and `algorithm_math_explained/` for the full mathematical documentation.
