@@ -1,0 +1,49 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  node distance=0.15cm and 0cm,
+  voxel/.style={rectangle, minimum width=1.6cm, minimum height=1.2cm,
+                text centered, draw=black, font=\small\bfseries}
+]
+
+%% --- Voxel row (cross-section) ---
+\node[voxel, fill=blue!20]   (v1) at (0,0)    {+0.8};
+\node[voxel, fill=blue!10]   (v2) at (1.65,0) {+0.4};
+\node[voxel, fill=yellow!40] (v3) at (3.3,0)  { 0.0};
+\node[voxel, fill=red!20]    (v4) at (4.95,0) {-0.4};
+\node[voxel, fill=red!35]    (v5) at (6.6,0)  {-0.8};
+
+%% --- Surface line ---
+\draw[very thick, dashed, green!60!black]
+      ($(v3.north east)!0.5!(v4.north west)$) -- ($(v3.south east)!0.5!(v4.south west)$);
+\node[font=\footnotesize\bfseries, text=green!60!black, above=0.3cm]
+     at ($(v3.north east)!0.5!(v4.north west)$) {surface};
+
+%% --- Labels above ---
+\node[font=\small, above=0.4cm of v1] {outside};
+\node[font=\small, above=0.4cm of v5] {inside};
+
+%% --- BEFORE row (all highlighted red) ---
+\node[font=\small\bfseries, text=red, left=1.5cm of v1] at (-0.3,-2.2) {BEFORE:};
+\foreach \x/\lbl in {0/+0.8, 1.65/+0.4, 3.3/0.0, 4.95/-0.4, 6.6/-0.8} {
+  \node[voxel, fill=red!40] at (\x,-2.2) {\lbl};
+}
+\node[font=\footnotesize, text=red, right=0.3cm] at (6.6+0.8,-2.2) {all voxels --- thick blob};
+
+%% --- AFTER row (only boundary) ---
+\node[font=\small\bfseries, text=green!60!black, left=1.5cm of v1] at (-0.3,-3.7) {AFTER:};
+\node[voxel, fill=gray!10] at (0,-3.7)    {+0.8};
+\node[voxel, fill=gray!10] at (1.65,-3.7) {+0.4};
+\node[voxel, fill=green!40] at (3.3,-3.7) { 0.0};
+\node[voxel, fill=gray!10] at (4.95,-3.7) {-0.4};
+\node[voxel, fill=gray!10] at (6.6,-3.7)  {-0.8};
+\node[font=\footnotesize, text=green!60!black, right=0.3cm] at (6.6+0.8,-3.7) {boundary only --- clean surface};
+
+%% --- Title ---
+\node[font=\large\bfseries] at (3.3, 1.5) {HashTSDF fetchPointsNormals Fix --- Issue \#22896};
+
+\end{tikzpicture}
+\end{document}
