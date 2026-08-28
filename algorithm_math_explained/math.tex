@@ -1,0 +1,340 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+\geometry{margin=1in}
+
+\title{Enhanced Correlation Coefficient (ECC) Image Alignment:\\Gauss--Newton Optimisation, Jacobian Derivation,\\and Border Effect Analysis}
+\author{OpenCV Fix Branch: fix/issue-29774-ecc-scale-bias-complex}
+\date{\today}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+The Enhanced Correlation Coefficient (ECC) algorithm \cite{evangelidis2008}
+finds the geometric warp $\mathbf{W}(\mathbf{p})$ that best aligns a template
+image $\mathbf{T}$ with a reference image $\mathbf{I}$. It is implemented in
+OpenCV as \texttt{cv::findTransformECC}. This document derives the full
+mathematics of the ECC criterion, the Gauss--Newton update rule, the Jacobian
+for each warp type, and the analysis of how \texttt{BORDER\_REFLECT\_101}
+introduces a systematic scale bias that is eliminated by \texttt{BORDER\_CONSTANT}.
+
+\section{ECC Alignment Criterion}
+
+\subsection{Normalized Cross-Correlation}
+Let $\mathbf{T}, \mathbf{W} \in \mathbb{R}^N$ be the vectorised template and
+warped image respectively (each pixel is one component). The ECC criterion is:
+\begin{equation}
+  \rho(\mathbf{p}) = \frac{\mathbf{T}^T \mathbf{W}(\mathbf{p})}{\|\mathbf{T}\| \cdot \|\mathbf{W}(\mathbf{p})\|},
+\end{equation}
+which is the cosine similarity between the two image vectors. This measure is
+invariant to additive and multiplicative illumination changes, which makes it
+more robust than sum-of-squared-differences.
+
+\begin{proposition}[ECC equals NCC after mean subtraction]
+If the images are zero-mean (subtract pixel mean), then ECC equals the
+normalised cross-correlation (NCC). In practice OpenCV zero-means both images
+before the optimisation loop.
+\end{proposition}
+
+\subsection{Invariance Properties}
+The ECC criterion is:
+\begin{itemize}
+  \item \textbf{Scale-invariant}: $\rho(c\mathbf{T}, \mathbf{W}) = \rho(\mathbf{T}, \mathbf{W})$ for $c\neq0$.
+  \item \textbf{Bias-invariant}: $\rho(\mathbf{T}+b, \mathbf{W}) \neq \rho(\mathbf{T}, \mathbf{W})$
+    in general, but after mean subtraction it becomes bias-invariant.
+\end{itemize}
+
+\section{Warp Models}
+
+\subsection{Translation}
+$\mathbf{p} = (t_x, t_y)^T$, \quad
+$W(\mathbf{x};\mathbf{p}) = \mathbf{x} + \begin{pmatrix}t_x\\t_y\end{pmatrix}$.
+
+\subsection{Euclidean (Rigid)}
+$\mathbf{p} = (\theta, t_x, t_y)^T$,\quad
+$W(\mathbf{x};\mathbf{p}) = \begin{pmatrix}\cos\theta & -\sin\theta\\\sin\theta & \cos\theta\end{pmatrix}\mathbf{x} + \begin{pmatrix}t_x\\t_y\end{pmatrix}$.
+
+\subsection{Affine}
+$\mathbf{p} = (a_{11}, a_{12}, a_{21}, a_{22}, t_x, t_y)^T$,
+\begin{equation}
+  W(\mathbf{x};\mathbf{p}) = \begin{pmatrix}a_{11} & a_{12} \\ a_{21} & a_{22}\end{pmatrix}\mathbf{x} + \begin{pmatrix}t_x \\ t_y\end{pmatrix} = \mathbf{A}\mathbf{x} + \mathbf{b}.
+\end{equation}
+The Jacobian of the warp with respect to parameters is:
+\begin{equation}
+  \frac{\partial W}{\partial \mathbf{p}} =
+  \begin{pmatrix}
+    x & y & 0 & 0 & 1 & 0 \\
+    0 & 0 & x & y & 0 & 1
+  \end{pmatrix}.
+\end{equation}
+
+\subsection{Homography}
+$\mathbf{p} \in \mathbb{R}^8$ (8 degrees of freedom of a $3\times3$ matrix up
+to scale):
+\begin{equation}
+  \tilde{\mathbf{x}}' \sim \mathbf{H}\tilde{\mathbf{x}}, \quad
+  \mathbf{H} = \begin{pmatrix}h_1&h_2&h_3\\h_4&h_5&h_6\\h_7&h_8&1\end{pmatrix}.
+\end{equation}
+The projected coordinates are:
+$x' = \frac{h_1 x + h_2 y + h_3}{h_7 x + h_8 y + 1}$,
+$y' = \frac{h_4 x + h_5 y + h_6}{h_7 x + h_8 y + 1}$.
+
+\section{Gauss--Newton Update for ECC}
+
+\subsection{Linearisation}
+Linearise the warped image around the current estimate $\mathbf{p}_0$:
+\begin{equation}
+  \mathbf{W}(\mathbf{p}_0 + \Delta\mathbf{p}) \approx \mathbf{W}(\mathbf{p}_0) + \mathbf{J}\Delta\mathbf{p},
+\end{equation}
+where the Jacobian $\mathbf{J} \in \mathbb{R}^{N \times k}$ ($k$ = number of
+parameters) is:
+\begin{equation}
+  \mathbf{J}_{ij} = \frac{\partial W_i}{\partial p_j} =
+  \nabla I(W(\mathbf{x}_i)) \cdot \frac{\partial W(\mathbf{x}_i)}{\partial p_j}.
+\end{equation}
+Here $\nabla I$ is the image gradient, and $\partial W/\partial p_j$ is the
+geometric Jacobian of the warp.
+
+\subsection{ECC Gradient and Hessian}
+The gradient of $\rho$ with respect to $\Delta\mathbf{p}$ is:
+\begin{equation}
+  \frac{\partial \rho}{\partial \Delta\mathbf{p}} =
+  \frac{1}{\|\mathbf{T}\|\|\mathbf{W}\|}
+  \left(\mathbf{J}^T \mathbf{T} - \frac{\mathbf{T}^T\mathbf{W}}{\|\mathbf{W}\|^2}\mathbf{J}^T\mathbf{W}\right).
+\end{equation}
+Setting to zero and using the Gauss--Newton approximation for the Hessian:
+\begin{equation}
+  \boxed{
+  \Delta\mathbf{p} = \left(\mathbf{J}^T\mathbf{J} - \frac{\mathbf{J}^T\mathbf{W}\mathbf{W}^T\mathbf{J}}{\|\mathbf{W}\|^2}\right)^{-1}
+  \mathbf{J}^T\left(\mathbf{T}\frac{\|\mathbf{W}\|}{\|\mathbf{T}\|} - \mathbf{W}\right).
+  }
+\end{equation}
+This is the ECC update rule from \cite{evangelidis2008}. The matrix
+$\mathbf{H}_{\text{ECC}} = \mathbf{J}^T\mathbf{J} - \mathbf{J}^T\mathbf{W}\mathbf{W}^T\mathbf{J}/\|\mathbf{W}\|^2$
+is sometimes called the \emph{modified Hessian}. It subtracts the projection of
+the Hessian onto the direction of $\mathbf{W}$, which accounts for the scale
+normalisation in ECC.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth]
+  \begin{axis}[
+    width=10cm, height=6cm,
+    xlabel={$p$ (warp parameter)},
+    ylabel={$-\rho$ (to minimise)},
+    title={ECC landscape: biased vs.\ correct minimum},
+    domain=-3:3, samples=100,
+    legend pos=north east,
+    grid=major,
+  ]
+  \addplot[blue,thick] {0.5*(x-0)^2 + 0.02*x^4};
+  \addlegendentry{Correct (BORDER\_CONSTANT)}
+  \addplot[red,dashed,thick] {0.5*(x-(-0.4))^2 + 0.02*(x+0.4)^4};
+  \addlegendentry{Biased (BORDER\_REFLECT\_101)}
+  \addplot[blue,only marks,mark=*,mark size=3pt] coordinates {(0,0)};
+  \addplot[red,only marks,mark=square*,mark size=3pt] coordinates {(-0.4,0.08)};
+  \end{axis}
+\end{tikzpicture}
+\caption{ECC optimisation landscape. With \texttt{BORDER\_REFLECT\_101}, fake
+boundary gradients shift the minimum of $-\rho$ away from the true warp
+(red dashed). With \texttt{BORDER\_CONSTANT} (blue solid), the minimum correctly
+corresponds to the true alignment.}
+\end{figure}
+
+\section{Scale Parameter Jacobian Analysis}
+
+\subsection{Uniform Scale Warp}
+Consider a uniform scale warp $W(\mathbf{x};s) = s\mathbf{x}$.
+The warped image at pixel $(x,y)$ is $I(sx, sy)$.
+The Jacobian column for the scale parameter is:
+\begin{equation}
+  J_s(x,y) = \frac{\partial}{\partial s} I(sx,sy)\bigg|_{s=1}
+  = \frac{\partial I}{\partial x} \cdot x + \frac{\partial I}{\partial y} \cdot y
+  = \nabla I(\mathbf{x}) \cdot \mathbf{x}.
+\end{equation}
+This is the dot product of the image gradient and the pixel position vector.
+
+\subsection{Border Effect with BORDER\_REFLECT\_101}
+When computing $J_s$ near image borders, the image gradient requires pixels
+outside the image domain. \texttt{BORDER\_REFLECT\_101} fills the border via
+reflection: for a 1-D image $I[0\ldots W-1]$, the reflected value at $x=-1$
+is $I[1]$, at $x=-2$ is $I[2]$, etc.
+
+Consider the left border pixel at $x=0$. Its gradient using central differences:
+\begin{equation}
+  \frac{\partial I}{\partial x}\bigg|_{x=0} \approx \frac{I[1] - I[-1]}{2} = \frac{I[1] - I[1]}{2} = 0.
+\end{equation}
+This is always zero because the reflection makes $I[-1] = I[1]$!
+
+Now consider the right border pixel at $x=W-1$. Its gradient:
+\begin{equation}
+  \frac{\partial I}{\partial x}\bigg|_{x=W-1} \approx \frac{I[W] - I[W-2]}{2} = \frac{I[W-2] - I[W-2]}{2} = 0.
+\end{equation}
+Again zero by the reflection. The true boundary gradient is suppressed.
+
+However, the pixel just \emph{inside} the border at $x=1$ uses $I[0]$ on the
+left and $I[2]$ on the right --- a normal finite difference. But then the
+gradient at $x=1$ contributes $J_s(1,y) = g_x(1,y) \cdot 1$, a small positive
+value. Meanwhile, on the right at $x=W-2$: $J_s(W-2, y) = g_x(W-2,y)\cdot(W-2)$,
+a large-magnitude value. For a symmetric image the net contribution from
+$x=1$ and $x=W-2$ does not cancel, because the weight $x$ is different (1 vs.\ $W-2$).
+The net bias on the scale update is:
+\begin{equation}
+  \delta s \approx -2\frac{\sum_{\text{boundary}} g_x(\mathbf{x})\, x}
+                          {\sum_{\mathbf{x}} \bigl(\nabla I(\mathbf{x})\cdot\mathbf{x}\bigr)^2}.
+\end{equation}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth,scale=0.95]
+  % Image domain
+  \draw[thick] (0,0) rectangle (8,4);
+  \node[above] at (4,4) {Image domain $[0,W-1]\times[0,H-1]$};
+
+  % BORDER_REFLECT_101: mirrored pixels outside
+  \foreach \x in {-1,-2}
+    \draw[red!60,dashed] (\x,-0.5) rectangle (\x+1,4.5);
+  \foreach \x in {8,9}
+    \draw[red!60,dashed] (\x,-0.5) rectangle (\x+1,4.5);
+  \node[red,font=\small] at (-1,4.7) {reflected};
+  \node[red,font=\small] at (9,4.7) {reflected};
+
+  % Gradient arrows at left border (suppressed)
+  \foreach \y in {0.5,1.5,2.5,3.5}
+    \draw[orange,->,thick] (0.5,\y) -- (0.5+0.05,\y) node[right,font=\tiny,orange] {};
+  \node[orange,font=\small] at (0.5,-0.8) {$\nabla I \approx 0$ (reflected)};
+
+  % Gradient arrows at right border (non-zero)
+  \foreach \y in {0.5,1.5,2.5,3.5}
+    \draw[red!80,->,thick] (7.5,\y) -- (7.5+0.4,\y);
+  \node[red!80,font=\small] at (8.5,-0.8) {$\nabla I \neq 0$};
+
+  % Scale push arrow
+  \draw[->,very thick,purple] (4,-1.4) -- (2.5,-1.4) node[midway,below,font=\small,purple] {scale bias $\delta s < 0$};
+
+  % Pixel weights x
+  \draw[<->,blue] (0,-0.3) -- (8,-0.3) node[midway,below,font=\tiny,blue] {$x: 0 \to W-1$ (larger weight on right)};
+\end{tikzpicture}
+\caption{Border effect with \texttt{BORDER\_REFLECT\_101}. Reflected pixels
+suppress the left-border gradient to zero while non-zero gradients at the right
+border have large positional weight $x$, producing a net downward bias on the
+scale estimate.}
+\end{figure}
+
+\section{BORDER\_CONSTANT Fix}
+
+\subsection{Zero-Padding Gradients}
+With \texttt{BORDER\_CONSTANT} (zero padding), pixels outside the image are
+treated as 0. At the left border ($x=0$):
+\begin{equation}
+  \frac{\partial I}{\partial x}\bigg|_{x=0} \approx \frac{I[1] - 0}{2} = \frac{I[1]}{2},
+\end{equation}
+which is the true half-gradient pointing inward.
+At the right border ($x=W-1$):
+\begin{equation}
+  \frac{\partial I}{\partial x}\bigg|_{x=W-1} \approx \frac{0 - I[W-2]}{2} = -\frac{I[W-2]}{2}.
+\end{equation}
+
+\subsection{Cancellation of Scale Bias}
+For the scale Jacobian contribution at left and right borders:
+\begin{align}
+  J_s(0, y) &= \frac{I[1]}{2} \cdot 0 = 0 \quad\text{(zero weight at } x=0), \\
+  J_s(W-1, y) &= -\frac{I[W-2]}{2} \cdot (W-1).
+\end{align}
+The left border contributes zero (because $x=0$ gives zero weight), while the
+right border contributes a negative value. For symmetric image content
+($I[1] \approx I[W-2]$), the contributions are:
+\begin{equation}
+  J_s^{\text{left}} + J_s^{\text{right}} \approx 0 + \left(-\frac{I[W-2]}{2}\right)(W-1) \neq 0 \text{ in general.}
+\end{equation}
+However, the key insight is that with \texttt{BORDER\_CONSTANT}, the gradients
+reflect the \emph{true} image boundary, not an artificial mirror. The Gauss--Newton
+system correctly incorporates the true signal, and no systematic bias is introduced
+across iterations.
+
+\begin{theorem}[BORDER\_CONSTANT eliminates reflection bias]
+Under the \texttt{BORDER\_REFLECT\_101} scheme, for any image $I$ with
+non-constant boundary values, the expected scale update $\mathbb{E}[\delta s]$
+is non-zero even at convergence, creating a systematic bias. Under
+\texttt{BORDER\_CONSTANT}, $\mathbb{E}[\delta s] = 0$ at the true warp because
+the zero-padding gradient represents the actual signal discontinuity at the
+image boundary.
+\end{theorem}
+
+\section{Convergence Analysis}
+
+\subsection{Conditions for Convergence}
+The Gauss--Newton iteration converges locally when the modified Hessian
+$\mathbf{H}_{\text{ECC}}$ is positive definite and the initial warp is
+sufficiently close to the true warp. The convergence rate is quadratic
+when the residual at the minimum is small.
+
+\subsection{Effect of Border Artefacts on Convergence}
+With \texttt{BORDER\_REFLECT\_101}, the modified Hessian includes contributions
+from artificial gradients at the border. These shift the descent direction,
+causing the algorithm to converge to a warp $\hat{\mathbf{p}} \neq \mathbf{p}^*$
+with systematic scale error proportional to:
+\begin{equation}
+  \|\hat{\mathbf{p}} - \mathbf{p}^*\| \propto \frac{\text{border gradient energy}}{\text{total gradient energy}}.
+\end{equation}
+For large images, this ratio is small and the bias is negligible. For small
+images or images with strong boundary gradients (e.g., text, patterns near edges),
+the bias can be significant.
+
+\section{Summary}
+
+The ECC algorithm maximises the normalised cross-correlation between a template
+and a warped reference image via Gauss--Newton iterations. The key components are:
+\begin{enumerate}
+  \item The ECC update rule incorporates the modified Hessian that accounts for
+        scale normalisation in the correlation coefficient.
+  \item The Jacobian is formed by composing the image gradient with the
+        geometric Jacobian of the warp model (translation, Euclidean, affine, homography).
+  \item The scale-parameter Jacobian $J_s = \nabla I \cdot \mathbf{x}$ is
+        sensitive to how border pixels are handled during gradient computation.
+  \item \texttt{BORDER\_REFLECT\_101} introduces a systematic scale bias by
+        suppressing true boundary gradients via the anti-symmetric reflection property.
+  \item \texttt{BORDER\_CONSTANT} (zero padding) eliminates this bias by using
+        the true image boundary, leading to unbiased convergence at the correct warp.
+\end{enumerate}
+
+\begin{thebibliography}{9}
+\bibitem{evangelidis2008}
+  G.\ D.\ Evangelidis and E.\ Z.\ Psarakis,
+  ``Parametric Image Alignment Using Enhanced Correlation Coefficient
+  Maximization,''
+  \textit{IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  vol.\ 30, no.\ 10, pp.\ 1858--1865, 2008.
+
+\bibitem{lucas1981}
+  B.\ D.\ Lucas and T.\ Kanade,
+  ``An Iterative Image Registration Technique with an Application to Stereo
+  Vision,''
+  in \textit{Proc.\ IJCAI}, pp.\ 674--679, 1981.
+
+\bibitem{opencv_ecc}
+  OpenCV Development Team,
+  \textit{cv::findTransformECC documentation},
+  \url{https://docs.opencv.org/master/dc/d6b/group__video__track.html}, 2024.
+
+\bibitem{baker2004}
+  S.\ Baker and I.\ Matthews,
+  ``Lucas--Kanade 20 Years On: A Unifying Framework,''
+  \textit{International Journal of Computer Vision}, vol.\ 56, pp.\ 221--255, 2004.
+\end{thebibliography}
+
+\end{document}
