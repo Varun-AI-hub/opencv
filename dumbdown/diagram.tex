@@ -1,0 +1,79 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, decorations.pathreplacing, positioning, fit}
+
+\begin{document}
+\begin{tikzpicture}[
+    >=Stealth,
+    box/.style={draw, rectangle, minimum width=#1, minimum height=1.6cm, line width=1.2pt},
+    labelstyle/.style={font=\small\sffamily},
+    arrowstyle/.style={->, thick}
+]
+
+%% ---- BEFORE FIX ----
+\node[box=6cm, fill=blue!10, draw=blue!60] (sensor) at (0,0)
+    {};
+\node[above=0.05cm of sensor, labelstyle, text=blue!70] {Full Sensor (e.g.\ $640\times480$)};
+
+% Computed ROI (too small) - inset by 0.3cm on each side
+\node[box=5.2cm, fill=orange!20, draw=orange!80, minimum height=1.0cm] (roi-bad) at (0,0)
+    {};
+\node[labelstyle, text=orange!90, align=center] at (0,0)
+    {Computed valid ROI\\(floor both edges = too narrow)};
+
+% Gap arrows - left
+\draw[arrowstyle, red!70]
+    (sensor.west |- 0,0.3) -- (roi-bad.west |- 0,0.3)
+    node[midway, above, labelstyle, text=red!80] {1\,px gap};
+
+% Gap arrows - right
+\draw[arrowstyle, red!70]
+    (sensor.east |- 0,0.3) -- (roi-bad.east |- 0,0.3)
+    node[midway, above, labelstyle, text=red!80] {1\,px gap};
+
+% Gap arrows - bottom
+\draw[arrowstyle, red!70]
+    ([yshift=-0.55cm]sensor.south) -- ([yshift=0.05cm]roi-bad.south)
+    node[midway, right, labelstyle, text=red!80] {1\,px};
+
+\node[below=0.1cm of sensor, labelstyle, font=\bfseries\sffamily, text=red!80]
+    {BEFORE FIX --- \texttt{cvFloor()} on both edges};
+
+%% ---- AFTER FIX (shifted right) ----
+\begin{scope}[xshift=8.5cm]
+
+\node[box=6cm, fill=blue!10, draw=blue!60] (sensor2) at (0,0)
+    {};
+\node[above=0.05cm of sensor2, labelstyle, text=blue!70] {Full Sensor (e.g.\ $640\times480$)};
+
+% Fixed ROI (same size as sensor, exactly)
+\node[box=5.98cm, fill=green!20, draw=green!70, minimum height=1.58cm] (roi-good) at (0,0)
+    {};
+\node[labelstyle, text=green!80!black, align=center] at (0,0)
+    {Fixed valid ROI\\(\texttt{cvFloor} left/top,\ \texttt{cvCeil} right/bottom)};
+
+% Tick marks showing exact fit
+\draw[green!60!black, line width=1.5pt]
+    ([xshift=0.5pt]sensor2.west) -- ([xshift=0.5pt]roi-good.west);
+\draw[green!60!black, line width=1.5pt]
+    ([xshift=-0.5pt]sensor2.east) -- ([xshift=-0.5pt]roi-good.east);
+
+\node[below=0.1cm of sensor2, labelstyle, font=\bfseries\sffamily, text=green!60!black]
+    {AFTER FIX --- \texttt{cvCeil()} on right/bottom edges};
+
+\end{scope}
+
+%% ---- Separator arrow ----
+\draw[->, line width=1.5pt, gray!60] (3.4,0) -- (5.1,0)
+    node[midway, above, labelstyle, text=gray!80] {patch};
+
+%% ---- Code snippet at bottom ----
+\node[draw=gray!40, fill=gray!8, rounded corners=4pt,
+      labelstyle, align=left, font=\ttfamily\footnotesize]
+    at (4.25,-2.2) {
+        \textbf{Before:}\ \ roi.width = cvFloor(x + w) - roi.x; \\
+        \textbf{After:}\ \ \ roi.width = cvCeil(x + w)\ \ - roi.x;
+    };
+
+\end{tikzpicture}
+\end{document}
