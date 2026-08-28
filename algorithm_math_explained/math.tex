@@ -1,0 +1,292 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+\pgfplotsset{compat=1.18}
+\geometry{margin=1in}
+
+\title{\textbf{ONNX Model Metadata API}\\
+\large Protocol Buffers Schema, Key-Value Storage, and API Design\\
+\normalsize OpenCV Fix: Issue 23277 --- ONNX Metadata Access}
+\author{OpenCV DNN Module}
+\date{\today}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+\newtheorem{lemma}{Lemma}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+ONNX (Open Neural Network Exchange) models can carry metadata alongside their computational graphs. This metadata includes preprocessing parameters, class labels, model provenance, and configuration hints. OpenCV's DNN module lacked an API to access this metadata, requiring users to write custom protobuf parsing code. This document provides a complete mathematical and systems treatment of ONNX metadata, the protobuf serialization format, and the design of an efficient key-value lookup API.
+
+\section{Protocol Buffers Serialization}
+
+\subsection{Protobuf Encoding}
+
+Protocol Buffers (protobuf) is a language-neutral, platform-neutral binary serialization format developed by Google. A protobuf message is serialized as a sequence of \emph{key-value records}, where each record encodes:
+
+\begin{equation}
+\text{record} = (\underbrace{\text{field\_number} \ll 3 \;|\; \text{wire\_type}}_{\text{varint tag}},\; \underbrace{\text{payload}}_{\text{wire-type dependent}})
+\end{equation}
+
+The wire types are:
+\begin{align}
+0 &: \text{Varint (integers, booleans, enums)} \\
+1 &: \text{64-bit (double, fixed64)} \\
+2 &: \text{Length-delimited (string, bytes, embedded messages, repeated)} \\
+5 &: \text{32-bit (float, fixed32)}
+\end{align}
+
+\subsection{ONNX ModelProto Structure}
+
+The ONNX model is a protobuf \texttt{ModelProto} message. Its relevant fields are:
+
+\begin{verbatim}
+message ModelProto {
+  optional string   ir_version      = 1;
+  repeated OperatorSetIdProto opset_import = 8;
+  optional GraphProto graph         = 7;
+  repeated StringStringEntryProto metadata_props = 14;
+}
+\end{verbatim}
+
+The \texttt{metadata\_props} field is a \emph{repeated} field (field number 14, wire type 2), meaning it can contain zero or more entries. Each entry is:
+
+\begin{verbatim}
+message StringStringEntryProto {
+  optional string key   = 1;
+  optional string value = 2;
+}
+\end{verbatim}
+
+\subsection{Binary Encoding of a Metadata Entry}
+
+For a metadata entry with key \texttt{"model\_version"} and value \texttt{"1.0"}, the binary encoding is:
+
+\begin{align}
+\underbrace{0x72}_{\text{tag: field=14, wire=2}} \;
+\underbrace{N}_{\text{length varint}} \;
+\underbrace{0x0A \; 0x0D \; \text{``model\_version"} \; 0x12 \; 0x03 \; \text{``1.0"}}_{\text{embedded StringStringEntryProto}}
+\end{align}
+
+Parsing complexity for a model with $K$ metadata entries is $O(K)$ for the linear scan.
+
+\section{Key-Value Store Mathematics}
+
+\subsection{Abstract Map Structure}
+
+Let $\Sigma^*$ denote the set of all finite strings over alphabet $\Sigma$. The metadata store is a partial function:
+
+\begin{equation}
+\mathcal{M} : \Sigma^* \rightharpoonup \Sigma^*
+\end{equation}
+
+with domain $\text{dom}(\mathcal{M}) = \{k_1, k_2, \ldots, k_K\}$ where $K$ is the number of metadata entries.
+
+\subsection{Ordered Map: std::map}
+
+The implementation uses \texttt{std::map<String, String>}, which is a balanced binary search tree (typically red-black tree).
+
+\begin{theorem}[std::map Complexity]
+For a \texttt{std::map} with $N$ entries:
+\begin{align}
+\text{Lookup: } & O(\log N) \text{ comparisons} \\
+\text{Insert: } & O(\log N) \text{ comparisons} \\
+\text{Delete: } & O(\log N) \text{ comparisons} \\
+\text{Iteration: } & O(N) \text{ (sorted order)}
+\end{align}
+The constant factor involves string comparison: $O(L)$ per comparison where $L$ is key length.
+\end{theorem}
+
+\subsection{Alternative: Unordered Map}
+
+\texttt{std::unordered\_map<String, String>} uses a hash table:
+
+\begin{theorem}[std::unordered\_map Complexity]
+\begin{align}
+\text{Average lookup: } & O(1) \text{ (assuming good hash)} \\
+\text{Worst-case lookup: } & O(N) \text{ (all keys hash to same bucket)} \\
+\text{Load factor: } & \alpha = N/B \text{ where } B = \text{number of buckets}
+\end{align}
+\end{theorem}
+
+\begin{remark}
+For metadata stores with typically small $N$ (tens of entries), the $O(\log N)$ overhead of \texttt{std::map} is negligible. Moreover, \texttt{std::map} provides deterministic worst-case behavior, making it preferable for a public API where untrusted model files could be loaded.
+\end{remark}
+
+\subsection{Comparison of Data Structures}
+
+Let $N$ be the number of metadata keys and $L$ the average key length.
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Structure} & \textbf{Lookup (avg)} & \textbf{Lookup (worst)} & \textbf{Memory} & \textbf{Ordered?} \\
+\hline
+\texttt{std::map}         & $O(L \log N)$ & $O(L \log N)$ & $O(N)$ & Yes \\
+\texttt{std::unordered\_map} & $O(L)$    & $O(LN)$       & $O(N)$ & No  \\
+Linear scan (vector)      & $O(LN)$       & $O(LN)$       & $O(N)$ & No  \\
+\hline
+\end{tabular}
+\caption{Comparison of data structures for metadata storage.}
+\end{table}
+
+\section{API Design}
+
+\subsection{Interface Specification}
+
+The proposed API for OpenCV \texttt{Net} class:
+
+\begin{verbatim}
+// Returns all metadata keys
+std::vector<String> Net::getMetaDataKeys() const;
+
+// Returns value for key, or defaultVal if key absent
+String Net::getMetaData(const String& key,
+                         const String& defaultVal = "") const;
+\end{verbatim}
+
+\subsection{Mathematical Specification}
+
+Let $\mathcal{M}$ be the metadata map loaded from the ONNX file.
+
+\paragraph{getMetaDataKeys()}
+\begin{equation}
+\texttt{getMetaDataKeys}() = \text{dom}(\mathcal{M}) = \{k : (k, v) \in \mathcal{M}\}
+\end{equation}
+Returns an ordered list of all keys (since \texttt{std::map} iterates in sorted order).
+
+\paragraph{getMetaData(key, defaultVal)}
+\begin{equation}
+\texttt{getMetaData}(k, d) = \begin{cases} \mathcal{M}(k) & \text{if } k \in \text{dom}(\mathcal{M}) \\ d & \text{otherwise} \end{cases}
+\end{equation}
+
+This is the standard \emph{default-valued lookup} pattern, also known as \texttt{get} with a sentinel in Python dictionaries.
+
+\subsection{Protobuf Parsing Algorithm}
+
+\begin{equation}
+\mathcal{M} \leftarrow \emptyset; \quad
+\forall (k, v) \in \texttt{model\_proto.metadata\_props}() : \mathcal{M}[k] \leftarrow v
+\end{equation}
+
+Pseudocode:
+\begin{verbatim}
+for (auto& prop : model_proto.metadata_props()) {
+    modelMetadata[prop.key()] = prop.value();
+}
+\end{verbatim}
+
+Time complexity: $O(K \log K)$ total where $K = |\texttt{metadata\_props}|$.
+
+\section{Use Cases and Metadata Semantics}
+
+\subsection{Preprocessing Parameters}
+
+Many models encode normalization parameters as metadata:
+\begin{align}
+\mu &= \texttt{getMetaData("mean")} = (0.485, 0.456, 0.406) \\
+\sigma &= \texttt{getMetaData("std")} = (0.229, 0.224, 0.225)
+\end{align}
+
+The preprocessing transform is:
+\begin{equation}
+\hat{x}_c = \frac{x_c - \mu_c}{\sigma_c}, \quad c \in \{R, G, B\}
+\end{equation}
+
+\subsection{Class Label Parsing}
+
+For a classification model:
+\begin{equation}
+\texttt{getMetaData("classes")} = \texttt{"cat,dog,bird,\ldots"}
+\end{equation}
+
+Parsing into a vector: split by comma delimiter, yielding $C$ class names $\{y_0, y_1, \ldots, y_{C-1}\}$.
+
+\subsection{Input Shape Encoding}
+
+\begin{equation}
+\texttt{getMetaData("input\_shape")} = \texttt{"1,3,224,224"} \Rightarrow \mathbf{d} = (1, 3, 224, 224)
+\end{equation}
+
+Total input tensor size: $\prod_i d_i = 150528$ float32 elements $= 602112$ bytes.
+
+\section{TikZ Figure: Metadata Pipeline}
+
+Figure~\ref{fig:metadata-pipeline} shows the complete pipeline from ONNX file to API call.
+
+\begin{figure}[h!]
+\centering
+\begin{tikzpicture}[
+    node distance=1.4cm,
+    box/.style={draw, rectangle, rounded corners, fill=blue!12, minimum width=3cm, minimum height=0.85cm, font=\small, text centered},
+    databox/.style={draw, rectangle, fill=orange!20, minimum width=3cm, minimum height=0.85cm, font=\small, text centered},
+    arrow/.style={->, >=Stealth, thick},
+    label/.style={font=\footnotesize, color=gray}
+]
+
+\node[box] (file) {ONNX file (.onnx)};
+\node[box, below=of file] (parse) {protobuf\\deserializer};
+\node[databox, below=of parse] (proto) {ModelProto\\in memory};
+\node[box, below=of proto] (iter) {iterate\\metadata\_props};
+\node[databox, below=of iter] (map) {std::map\\$\{$key $\to$ value$\}$};
+\node[box, below=of map] (api) {getMetaData(key)};
+\node[databox, below=of api] (result) {String value};
+
+\draw[arrow] (file) -- node[right, label] {binary read} (parse);
+\draw[arrow] (parse) -- node[right, label] {$O(F)$ where $F$=filesize} (proto);
+\draw[arrow] (proto) -- node[right, label] {access field 14} (iter);
+\draw[arrow] (iter) -- node[right, label] {$O(K)$ insertions} (map);
+\draw[arrow] (map) -- node[right, label] {stored in Net} (api);
+\draw[arrow] (api) -- node[right, label] {$O(\log K)$ lookup} (result);
+
+\end{tikzpicture}
+\caption{Complete metadata pipeline: from ONNX binary file through protobuf deserialization, ModelProto parsing, map construction, to the \texttt{getMetaData()} API call.}
+\label{fig:metadata-pipeline}
+\end{figure}
+
+\section{Information-Theoretic Considerations}
+
+\subsection{Entropy of Metadata Keys}
+
+If the model comes from a distribution over models, and each model has metadata drawn from a key vocabulary $\mathcal{K}$, the entropy of the key set is:
+
+\begin{equation}
+H(\mathcal{K}) = -\sum_{k \in \mathcal{K}} p(k) \log_2 p(k)
+\end{equation}
+
+In practice, most deployed models use a small standardized set of keys (mean, std, classes, version), so $H(\mathcal{K})$ is low and a hash table provides minimal advantage over a sorted map.
+
+\subsection{Compression of Metadata}
+
+ONNX metadata is stored uncompressed in the protobuf binary. For models with large class lists, the metadata can dominate model size. A compressed encoding could use:
+
+\begin{equation}
+H_{\text{Huffman}}(\text{keys}) = \sum_{k} p(k) \lceil -\log_2 p(k) \rceil \text{ bits/symbol}
+\end{equation}
+
+but this optimization is outside the scope of the fix.
+
+\section{References}
+
+\begin{enumerate}
+  \item Google. \textit{Protocol Buffers Language Guide (proto2)}. \url{https://protobuf.dev/programming-guides/proto/}
+  \item ONNX Specification. \textit{ModelProto definition}. \url{https://github.com/onnx/onnx/blob/main/onnx/onnx.proto}
+  \item OpenCV. \textit{Net class API documentation}. \url{https://docs.opencv.org/}
+  \item Meyers, S. \textit{Effective STL}. Addison-Wesley, 2001.
+  \item ISO/IEC 14882:2020. \textit{Programming languages --- C++}. Standard for associative containers, \S 26.5.
+\end{enumerate}
+
+\end{document}
