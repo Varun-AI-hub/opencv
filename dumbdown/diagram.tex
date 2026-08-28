@@ -1,0 +1,58 @@
+\documentclass{standalone}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  box/.style={rectangle, rounded corners=4pt, minimum width=3.2cm, minimum height=0.9cm,
+              text centered, draw=black, font=\small\bfseries},
+  arrow/.style={-{Stealth[length=5pt]}, thick},
+  label/.style={font=\footnotesize, text=gray}
+]
+
+% Title
+\node[font=\large\bfseries] (title) at (4,1.2) {SimpleBlobDetector — Filter Pipeline};
+
+% Input
+\node[box, fill=gray!20] (input) at (4,0) {Input Image};
+
+% Filter stages
+\node[box, fill=orange!40, below=of input]   (color)  {Filter by Color};
+\node[box, fill=blue!30,   below=of color]   (area)   {Filter by Area};
+\node[box, fill=green!40,  below=of area]    (circ)   {Filter by Circularity};
+\node[box, fill=purple!30, below=of circ]    (inert)  {Filter by Inertia};
+\node[box, fill=red!30,    below=of inert]   (conv)   {Filter by Convexity};
+
+% Output
+\node[box, fill=yellow!50, below=of conv] (output) {Detected Blobs};
+
+% Arrows down the pipeline
+\draw[arrow] (input)  -- (color);
+\draw[arrow] (color)  -- (area);
+\draw[arrow] (area)   -- (circ);
+\draw[arrow] (circ)   -- (inert);
+\draw[arrow] (inert)  -- (conv);
+\draw[arrow] (conv)   -- (output);
+
+% Annotations on the right — params for each stage
+\node[label, right=1.4cm of color]  (lcolor) {\texttt{filterByColor, blobColor}};
+\node[label, right=1.4cm of area]   (larea)  {\texttt{filterByArea, minArea, maxArea}};
+\node[label, right=1.4cm of circ]   (lcirc)  {\texttt{filterByCircularity,}\\[2pt]\texttt{minCircularity, maxCircularity}};
+\node[label, right=1.4cm of inert]  (linert) {\texttt{filterByInertia,}\\[2pt]\texttt{minInertiaRatio, maxInertiaRatio}};
+\node[label, right=1.4cm of conv]   (lconv)  {\texttt{filterByConvexity,}\\[2pt]\texttt{minConvexity, maxConvexity}};
+
+% Dashed lines connecting stages to labels
+\draw[dashed, gray!60] (color.east)  -- (lcolor.west);
+\draw[dashed, gray!60] (area.east)   -- (larea.west);
+\draw[dashed, gray!60] (circ.east)   -- (lcirc.west);
+\draw[dashed, gray!60] (inert.east)  -- (linert.west);
+\draw[dashed, gray!60] (conv.east)   -- (lconv.west);
+
+% Before/after note at the bottom
+\node[font=\footnotesize\itshape, text width=8cm, align=center]
+  at (4, -8.2) {Before the fix: all 18 Params fields had \textbf{no documentation}.
+  After: every field has a doxygen comment explaining its purpose and valid range.};
+
+\end{tikzpicture}
+\end{document}
