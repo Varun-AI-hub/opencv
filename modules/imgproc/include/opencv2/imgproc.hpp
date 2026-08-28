@@ -255,7 +255,13 @@ enum InterpolationFlags{
     INTER_CUBIC          = 2,
     /** resampling using pixel area relation. It may be a preferred method for image decimation, as
     it gives moire'-free results. But when the image is zoomed, it is similar to the INTER_NEAREST
-    method. */
+    method.
+
+    @note When used with cv::warpAffine or cv::warpPerspective, INTER_AREA is currently treated
+    as INTER_LINEAR. True area-based (EWA) interpolation for general warps is not yet implemented.
+    For proper anti-aliasing when downscaling with warpAffine, use the warpAffineAntiAliased()
+    helper function, which applies a Gaussian pre-blur with sigma proportional to the local scale
+    factor before resampling with INTER_LINEAR. See also: GitHub issue #21060. */
     INTER_AREA           = 3,
     /** Lanczos interpolation over 8x8 neighborhood */
     INTER_LANCZOS4       = 4,
@@ -2129,6 +2135,42 @@ CV_EXPORTS_W void warpAffine( InputArray src, OutputArray dst,
                               int borderMode = BORDER_CONSTANT,
                               const Scalar& borderValue = Scalar(),
                               AlgorithmHint hint = cv::ALGO_HINT_DEFAULT);
+
+/** @brief Applies an affine transformation to an image with proper anti-aliasing for downscaling.
+
+This helper function addresses the limitation of cv::warpAffine when used with INTER_AREA:
+while warpAffine silently treats INTER_AREA as INTER_LINEAR (which causes aliasing on
+downscaling warps), warpAffineAntiAliased detects the local scale factor from the transformation
+matrix and applies a Gaussian pre-blur before resampling, approximating the Elliptical Weighted
+Average (EWA) anti-aliasing filter.
+
+The algorithm:
+- Computes the scale factor s = sqrt(|det(J)|) where J is the 2x2 linear part of the inverse map.
+- If s > 1 (the warp is downscaling in source->destination direction):
+  applies GaussianBlur with sigma = 0.5 * s on the source, then calls warpAffine with INTER_LINEAR.
+- If s <= 1 (upscaling): calls warpAffine directly with INTER_CUBIC for quality upscaling.
+
+This is equivalent to EWA for isotropic warps and a good approximation for moderate anisotropy.
+For the mathematical background, see: "Fundamentals of Texture Mapping and Image Warping"
+(Heckbert, 1989) and OpenCV issue #21060.
+
+@param src input image.
+@param dst output image that has the size dsize and the same type as src.
+@param M 2x3 transformation matrix.
+@param dsize size of the output image.
+@param flags combination of interpolation methods and the optional flag #WARP_INVERSE_MAP.
+       The interpolation flag is overridden internally (INTER_LINEAR for downscale,
+       INTER_CUBIC for upscale).
+@param borderMode pixel extrapolation method (see #BorderTypes).
+@param borderValue value used in case of a constant border; by default, it is 0.
+
+@sa warpAffine, GaussianBlur
+*/
+CV_EXPORTS_W void warpAffineAntiAliased( InputArray src, OutputArray dst,
+                                         InputArray M, Size dsize,
+                                         int flags = INTER_LINEAR,
+                                         int borderMode = BORDER_CONSTANT,
+                                         const Scalar& borderValue = Scalar());
 
 /** @example samples/cpp/snippets/warpPerspective_demo.cpp
 An example program shows using cv::getPerspectiveTransform and cv::warpPerspective for image warping

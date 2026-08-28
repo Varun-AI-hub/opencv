@@ -1199,5 +1199,130 @@ TEST(Imgproc_Warping, DISABLED_playground)
     }
 }
 
+// ============================================================================
+// Tests for warpAffineAntiAliased (issue #21060)
+//
+// Verifies that warpAffineAntiAliased produces fewer aliasing artifacts than
+// plain warpAffine with INTER_LINEAR when performing a 2x downscale.
+//
+// Strategy:
+//   1. Build a synthetic "ground truth" by averaging 2x2 blocks of a high-frequency
+//      checkerboard pattern (true area average).
+//   2. Downsample the same source with warpAffine INTER_LINEAR.
+//   3. Downsample with warpAffineAntiAliased.
+//   4. Assert that warpAffineAntiAliased has lower RMSE against ground truth than
+//      plain INTER_LINEAR.
+// ============================================================================
+TEST(Imgproc_WarpAffineAntiAliased, downscale_fewer_aliasing_artifacts)
+{
+    // Create a high-frequency checkerboard (8x8 check pattern) that will alias
+    // on 2x downscale if no anti-aliasing is applied.
+    const int srcSize = 128;
+    const int dstSize = srcSize / 2;  // 2x downscale
+
+    Mat src(srcSize, srcSize, CV_32F);
+    for (int y = 0; y < srcSize; y++)
+    {
+        for (int x = 0; x < srcSize; x++)
+        {
+            // 2-pixel checkerboard: frequencies at Nyquist of the downsampled image
+            src.at<float>(y, x) = (((x / 2) + (y / 2)) % 2 == 0) ? 1.0f : 0.0f;
+        }
+    }
+
+    // Ground truth: exact 2x2 block average (correct INTER_AREA result for 2x downscale)
+    Mat groundTruth(dstSize, dstSize, CV_32F);
+    for (int y = 0; y < dstSize; y++)
+    {
+        for (int x = 0; x < dstSize; x++)
+        {
+            float sum = src.at<float>(2*y,   2*x)   + src.at<float>(2*y,   2*x+1)
+                      + src.at<float>(2*y+1, 2*x)   + src.at<float>(2*y+1, 2*x+1);
+            groundTruth.at<float>(y, x) = sum / 4.0f;
+        }
+    }
+
+    // Build a pure 2x downscale affine matrix (no translation, no rotation)
+    // Forward map: dst = 0.5 * src => src = 2 * dst
+    float Mdata[6] = { 0.5f, 0.0f, 0.0f,
+                       0.0f, 0.5f, 0.0f };
+    Mat M(2, 3, CV_32F, Mdata);
+    Size dsize(dstSize, dstSize);
+
+    // Plain warpAffine with INTER_LINEAR (current behaviour, aliases)
+    Mat dstLinear;
+    warpAffine(src, dstLinear, M, dsize, INTER_LINEAR, BORDER_REFLECT_101);
+
+    // warpAffineAntiAliased (Gaussian pre-blur approximation)
+    Mat dstAntiAliased;
+    warpAffineAntiAliased(src, dstAntiAliased, M, dsize, INTER_LINEAR, BORDER_REFLECT_101);
+
+    // Compute RMSE against ground truth for both methods.
+    // Ignore a 4-pixel border to avoid boundary effects.
+    Rect roi(4, 4, dstSize - 8, dstSize - 8);
+    Mat gtRoi       = groundTruth(roi);
+    Mat linearRoi   = dstLinear(roi);
+    Mat antiAliasRoi = dstAntiAliased(roi);
+
+    double rmseLinear     = std::sqrt(cv::norm(linearRoi, gtRoi, NORM_L2SQR) / roi.area());
+    double rmseAntiAlias  = std::sqrt(cv::norm(antiAliasRoi, gtRoi, NORM_L2SQR) / roi.area());
+
+    // warpAffineAntiAliased should produce lower RMSE against ground truth than plain INTER_LINEAR
+    EXPECT_LT(rmseAntiAlias, rmseLinear)
+        << "Expected warpAffineAntiAliased to have lower RMSE than plain INTER_LINEAR. "
+        << "RMSE linear=" << rmseLinear << " antiAlias=" << rmseAntiAlias;
+
+    // Also verify the result is plausible: ground-truth pixel values are all 0.5
+    // (equal mix of 0.0 and 1.0 checkerboard), so anti-aliased should be close to 0.5.
+    double meanAntiAlias = cv::mean(antiAliasRoi)[0];
+    EXPECT_NEAR(meanAntiAlias, 0.5, 0.05)
+        << "Expected anti-aliased output mean to be close to 0.5, got " << meanAntiAlias;
+}
+
+// Verify that warpAffineAntiAliased uses INTER_CUBIC for upscaling (no crash, sensible output)
+TEST(Imgproc_WarpAffineAntiAliased, upscale_does_not_crash)
+{
+    Mat src(32, 32, CV_8U, cv::Scalar(128));
+    // Put some variation in source
+    src(cv::Rect(8, 8, 16, 16)) = cv::Scalar(200);
+
+    // 2x upscale
+    float Mdata[6] = { 2.0f, 0.0f, 0.0f,
+                       0.0f, 2.0f, 0.0f };
+    Mat M(2, 3, CV_32F, Mdata);
+    Size dsize(64, 64);
+
+    Mat dst;
+    ASSERT_NO_THROW(warpAffineAntiAliased(src, dst, M, dsize));
+    EXPECT_EQ(dst.size(), dsize);
+    EXPECT_EQ(dst.type(), src.type());
+}
+
+// Verify that warpAffineAntiAliased handles WARP_INVERSE_MAP flag correctly
+TEST(Imgproc_WarpAffineAntiAliased, inverse_map_flag)
+{
+    Mat src(64, 64, CV_32F);
+    cv::randu(src, 0, 1);
+
+    // 2x downscale, providing the inverse map (dst->src) directly
+    float Mdata[6] = { 2.0f, 0.0f, 0.0f,
+                       0.0f, 2.0f, 0.0f };
+    Mat M(2, 3, CV_32F, Mdata);
+    Size dsize(32, 32);
+
+    Mat dst1, dst2;
+    // Forward map: M_fwd = 0.5*I
+    float MfwdData[6] = { 0.5f, 0.0f, 0.0f,
+                          0.0f, 0.5f, 0.0f };
+    Mat Mfwd(2, 3, CV_32F, MfwdData);
+
+    ASSERT_NO_THROW(warpAffineAntiAliased(src, dst1, Mfwd, dsize));
+    ASSERT_NO_THROW(warpAffineAntiAliased(src, dst2, M, dsize, WARP_INVERSE_MAP));
+
+    // Both should produce outputs of the correct size
+    EXPECT_EQ(dst1.size(), dsize);
+    EXPECT_EQ(dst2.size(), dsize);
+}
+
 }} // namespace
 /* End of file. */

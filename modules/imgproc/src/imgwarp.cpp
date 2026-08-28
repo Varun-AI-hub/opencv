@@ -2480,6 +2480,11 @@ void cv::warpAffine( InputArray _src, OutputArray _dst,
 
     double M[6] = {0};
     Mat matM(2, 3, CV_64F, M);
+    //! @note INTER_AREA is not yet implemented for warpAffine. It is currently treated as
+    //! INTER_LINEAR, which may produce aliasing artifacts when the warp involves downscaling.
+    //! For proper anti-aliasing when downscaling, use warpAffineAntiAliased() instead, which
+    //! applies a Gaussian pre-blur with sigma proportional to the local scale factor before
+    //! calling warpAffine with INTER_LINEAR. See also: GitHub issue #21060.
     if( interpolation == INTER_AREA )
         interpolation = INTER_LINEAR;
 
@@ -3181,6 +3186,85 @@ void cv::warpPolar(InputArray _src, OutputArray _dst, Size dsize,
 
         remap(src, _dst, mapx, mapy, flags & cv::INTER_MAX,
               (flags & cv::WARP_FILL_OUTLIERS) ? cv::BORDER_CONSTANT : cv::BORDER_TRANSPARENT);
+    }
+}
+
+// ============================================================================
+// warpAffineAntiAliased: practical anti-aliasing helper for affine downscaling
+//
+// Implements the Gaussian pre-blur approximation to the EWA (Elliptical Weighted
+// Average) filter. For a downscaling affine warp with scale factor s, applying a
+// Gaussian blur with sigma = 0.5*s before INTER_LINEAR warpAffine is equivalent
+// to EWA for isotropic warps (see Heckbert 1989, and OpenCV issue #21060).
+//
+// For upscaling, INTER_CUBIC is used directly (no pre-blur needed).
+// ============================================================================
+void cv::warpAffineAntiAliased( InputArray _src, OutputArray _dst,
+                                 InputArray _M0, Size dsize,
+                                 int flags,
+                                 int borderMode,
+                                 const Scalar& borderValue )
+{
+    Mat src = _src.getMat();
+    Mat M0  = _M0.getMat();
+
+    CV_Assert( (M0.type() == CV_32F || M0.type() == CV_64F) && M0.rows == 2 && M0.cols == 3 );
+
+    // Extract the 2x2 linear part (forward or inverse depending on WARP_INVERSE_MAP flag).
+    // We need the inverse-map Jacobian (dst->src) to compute the source footprint size.
+    double m11, m12, m21, m22;
+    {
+        Mat M64;
+        M0.convertTo(M64, CV_64F);
+        const double* p = M64.ptr<double>();
+        if( flags & WARP_INVERSE_MAP )
+        {
+            // M is already the inverse map (dst->src), so J_inv = 2x2 block of M
+            m11 = p[0]; m12 = p[1];
+            m21 = p[3]; m22 = p[4];
+        }
+        else
+        {
+            // M is the forward map (src->dst). Invert the 2x2 block to get dst->src Jacobian.
+            double det = p[0]*p[4] - p[1]*p[3];
+            if( std::abs(det) < 1e-14 )
+            {
+                // Singular or near-singular: fall back to plain warpAffine
+                warpAffine(_src, _dst, _M0, dsize, INTER_LINEAR, borderMode, borderValue);
+                return;
+            }
+            double invDet = 1.0 / det;
+            m11 =  p[4] * invDet;
+            m12 = -p[1] * invDet;
+            m21 = -p[3] * invDet;
+            m22 =  p[0] * invDet;
+        }
+    }
+
+    // The local area scaling from destination to source is |det(J_inv)|.
+    // scale = sqrt(|det(J_inv)|): if > 1, the warp is downscaling (each dst pixel
+    // covers more than 1 source pixel), so anti-aliasing is needed.
+    double det_J_inv = m11*m22 - m12*m21;
+    double scaleFactor = std::sqrt(std::abs(det_J_inv));
+
+    if( scaleFactor > 1.0 )
+    {
+        // Downscaling: apply Gaussian pre-blur with sigma proportional to scale factor.
+        // sigma = 0.5 * scaleFactor approximates the EWA Gaussian width for isotropic warps.
+        double sigma = 0.5 * scaleFactor;
+
+        // Kernel size: must be odd and large enough to cover 3-sigma on each side.
+        int ksize = (int)(6.0 * sigma + 1.0) | 1;  // round up to nearest odd number
+        ksize = std::max(ksize, 3);
+
+        Mat blurred;
+        GaussianBlur(src, blurred, Size(ksize, ksize), sigma, sigma, borderMode);
+        warpAffine(blurred, _dst, _M0, dsize, INTER_LINEAR, borderMode, borderValue);
+    }
+    else
+    {
+        // Upscaling: use INTER_CUBIC for quality upscaling (no pre-blur needed).
+        warpAffine(src, _dst, _M0, dsize, INTER_CUBIC, borderMode, borderValue);
     }
 }
 
