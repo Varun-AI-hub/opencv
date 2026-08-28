@@ -1,0 +1,67 @@
+\documentclass[tikz,border=12pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.callouts}
+
+\begin{document}
+\begin{tikzpicture}[font=\small]
+
+%% ===== LEFT: blobColor=255, BEFORE FIX =====
+\node[font=\bfseries] at (2.0, 5.8) {blobColor=255 (white on black)};
+\node[font=\small, red] at (2.0, 5.3) {BEFORE FIX};
+
+% Black background rectangle
+\fill[black!90] (0, 0) rectangle (4.0, 5.0);
+
+% White blob (circle approximated with filled shape)
+\fill[white!95] (2.0, 2.5) circle (1.4);
+
+% True center
+\fill[green!60!black] (2.0, 2.5) circle (0.08);
+\node[green!60!black, right, font=\footnotesize] at (2.12, 2.5)
+  {true center\\(60,40)};
+
+% Bug: shifted center
+\fill[red] (1.5, 2.9) circle (0.1);
+\draw[-{Stealth}, red, thick] (1.5, 2.9) -- (0.5, 4.2)
+  node[above, align=center, font=\footnotesize, red]
+  {reported center\\(58,37) WRONG};
+
+% Label
+\node[draw=red, thick, rounded corners, fill=red!10,
+      font=\footnotesize, align=center] at (2.0, -0.6)
+  {Asymmetric inversion\\shifts the centroid};
+
+%% ===== MIDDLE ARROW =====
+\draw[-{Stealth}, very thick, blue!70] (4.4, 2.5) -- (5.4, 2.5)
+  node[midway, above, font=\footnotesize, align=center] {fix:\\remove\\inversion};
+
+%% ===== RIGHT: blobColor=255, AFTER FIX =====
+\node[font=\bfseries] at (8.0, 5.8) {blobColor=255 (white on black)};
+\node[font=\small, green!60!black] at (8.0, 5.3) {AFTER FIX};
+
+% Black background
+\fill[black!90] (6.0, 0) rectangle (10.0, 5.0);
+
+% White blob
+\fill[white!95] (8.0, 2.5) circle (1.4);
+
+% Correct center
+\fill[green!60!black] (8.0, 2.5) circle (0.12);
+\draw[-{Stealth}, green!60!black, thick] (8.0, 2.5) -- (9.0, 4.0)
+  node[above, align=center, font=\footnotesize, green!60!black]
+  {reported center\\(60,40) CORRECT};
+
+% Label
+\node[draw=green!60!black, thick, rounded corners, fill=green!10,
+      font=\footnotesize, align=center] at (8.0, -0.6)
+  {Same centroid formula\\for all blobColor values};
+
+%% ===== COMPARISON TABLE =====
+\node[draw, rounded corners, fill=yellow!10, align=left,
+      font=\footnotesize, inner sep=6pt] at (5.0, -1.8) {
+  \textbf{Centroid formula:} $\bar{x} = \frac{\sum x_i}{\text{N pixels}}$
+  \quad (same for both cases after fix)
+};
+
+\end{tikzpicture}
+\end{document}
