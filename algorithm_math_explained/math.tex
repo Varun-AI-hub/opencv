@@ -1,0 +1,345 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+
+\geometry{margin=1in}
+
+\title{\textbf{SimpleBlobDetector: Full Mathematical Exposition}\\
+\large Multi-threshold Blob Detection in OpenCV}
+\author{OpenCV Project --- Algorithm Documentation}
+\date{2024}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{Fundamentals: Image Thresholding}
+%----------------------------------------------------------------------
+
+\subsection{Binary Thresholding}
+
+Given a grayscale image $I : \Omega \to [0, 255]$ where $\Omega \subset \mathbb{Z}^2$ is the
+pixel grid, binary thresholding at level $\theta$ produces a binary image:
+
+\begin{equation}
+T_\theta(x,y) =
+\begin{cases}
+255 & \text{if } I(x,y) \geq \theta \\
+0   & \text{otherwise}
+\end{cases}
+\label{eq:thresh}
+\end{equation}
+
+\begin{definition}[Global Threshold]
+A \emph{global threshold} uses a single value $\theta$ for the entire image.
+The optimal global threshold by Otsu's method maximises the inter-class variance:
+\[
+\sigma_B^2(\theta) = \omega_0(\theta)\,\omega_1(\theta)\,[\mu_0(\theta)-\mu_1(\theta)]^2,
+\]
+where $\omega_k$ is the fraction of pixels in class $k$ and $\mu_k$ is their mean intensity.
+\end{definition}
+
+\begin{definition}[Adaptive Threshold]
+An \emph{adaptive threshold} computes $\theta(x,y)$ locally, e.g.\ as the Gaussian-weighted
+mean of a neighbourhood $\mathcal{N}(x,y)$ minus a constant $C$:
+\[
+\theta(x,y) = \frac{1}{|\mathcal{N}|}\sum_{(x',y')\in\mathcal{N}} w(x',y')\,I(x',y') - C.
+\]
+\end{definition}
+
+\subsection{Multi-threshold Sweep}
+
+\texttt{SimpleBlobDetector} does not commit to a single threshold.  Instead it sweeps
+$\theta$ uniformly across an interval:
+\begin{equation}
+\theta_k = \texttt{minThreshold} + k\cdot\texttt{thresholdStep},
+\quad k = 0, 1, \ldots, K-1,
+\label{eq:sweep}
+\end{equation}
+with $K = \lfloor (\texttt{maxThreshold}-\texttt{minThreshold}) /
+\texttt{thresholdStep} \rfloor + 1$.
+At each level $\theta_k$ an independent binary image $T_{\theta_k}$ is formed and
+connected-component analysis is run.  Results across all levels are then merged
+(Section~\ref{sec:merge}).
+
+%----------------------------------------------------------------------
+\section{Connected Components Analysis}
+%----------------------------------------------------------------------
+
+\subsection{Connectivity}
+
+\begin{definition}[4-Connectivity]
+Two pixels $p$ and $q$ are \emph{4-connected} if they share a horizontal or vertical edge:
+$\|p - q\|_1 = 1$.
+\end{definition}
+
+\begin{definition}[8-Connectivity]
+Two pixels $p$ and $q$ are \emph{8-connected} if they are 4-connected or share a diagonal:
+$\|p - q\|_\infty = 1$.
+\end{definition}
+
+A \emph{connected component} $C$ is a maximal set of foreground pixels that are mutually
+reachable via the chosen connectivity relation.
+
+\subsection{Union-Find with Path Compression}
+
+The standard two-pass labeling algorithm uses a \emph{Union-Find} (disjoint-set) forest.
+Each pixel is a node; merging two components calls \textsc{Union}; finding the canonical
+label calls \textsc{Find}.
+
+\begin{definition}[Path Compression]
+After \textsc{Find}$(x)$ traverses the path to the root $r$, every node on the path is
+re-linked directly to $r$.  This flattens the tree and makes subsequent \textsc{Find} calls
+nearly $O(1)$ (inverse-Ackermann amortised cost $O(\alpha(n))$).
+\end{definition}
+
+\subsection{Centroid Computation}
+
+For a connected component $C$ of $|C|$ pixels, the \emph{centroid} is:
+\begin{equation}
+\bar{x} = \frac{1}{|C|}\sum_{(x,y)\in C} x,
+\qquad
+\bar{y} = \frac{1}{|C|}\sum_{(x,y)\in C} y.
+\label{eq:centroid}
+\end{equation}
+
+The \emph{radius} (for circular blobs) is estimated from the area assuming a circular shape:
+\begin{equation}
+r = \sqrt{\frac{|C|}{\pi}}.
+\label{eq:radius}
+\end{equation}
+
+%----------------------------------------------------------------------
+\section{Multi-scale Blob Merging}
+\label{sec:merge}
+%----------------------------------------------------------------------
+
+For each threshold level $\theta_k$ define the blob set
+$\mathcal{B}_k = \{(c_i^{(k)}, r_i^{(k)})\}$
+where $c_i^{(k)} = (\bar{x}_i^{(k)}, \bar{y}_i^{(k)})$ and $r_i^{(k)}$ are the
+centroid and radius of blob $i$ at level $k$.
+
+\subsection{Merge Criterion}
+
+Two blobs $(c_1, r_1)$ (from level $k$) and $(c_2, r_2)$ (from level $k+1$) are
+considered the \emph{same physical blob} and are merged if:
+\begin{equation}
+\|c_1 - c_2\|_2 < \min(r_1, r_2).
+\label{eq:merge}
+\end{equation}
+
+\subsection{Merged Blob Estimate}
+
+When $m$ blobs $\{(c_i, r_i)\}_{i=1}^m$ from different threshold levels merge, the
+final blob parameters are:
+\begin{align}
+c^* &= \frac{1}{m}\sum_{i=1}^m c_i, \label{eq:merged_center}\\
+r^* &= \frac{1}{m}\sum_{i=1}^m r_i. \label{eq:merged_radius}
+\end{align}
+
+\begin{remark}
+A blob that does not survive across multiple threshold levels indicates a fragile
+detection; \texttt{minRepeatability} enforces a minimum count of threshold levels
+on which the blob must appear.
+\end{remark}
+
+%----------------------------------------------------------------------
+\section{Five Filter Criteria}
+%----------------------------------------------------------------------
+
+\subsection{Color Filter}
+
+Let $\mu_C$ be the mean intensity of $I$ over the pixels of blob $C$:
+\[
+\mu_C = \frac{1}{|C|}\sum_{(x,y)\in C} I(x,y).
+\]
+The blob passes the color filter if
+\begin{equation}
+|\mu_C - \texttt{blobColor}| \leq \epsilon,
+\label{eq:color}
+\end{equation}
+where $\epsilon$ is an implementation tolerance (typically 1 gray-level).
+
+\subsection{Area Filter}
+
+The area of a blob is simply $A = |C|$ (pixel count).  It passes if:
+\begin{equation}
+\texttt{minArea} \leq A \leq \texttt{maxArea}.
+\label{eq:area}
+\end{equation}
+
+\subsection{Circularity Filter}
+
+Let $P$ denote the perimeter of the blob's contour (in pixels).  The circularity is:
+\begin{equation}
+\text{circ} = \frac{4\pi A}{P^2}.
+\label{eq:circ}
+\end{equation}
+For a perfect circle $\text{circ} = 1$; for any other shape $\text{circ} < 1$.
+The blob passes if $\text{minCircularity} \leq \text{circ} \leq \text{maxCircularity}$.
+
+\subsection{Inertia Ratio Filter}
+
+The second-order central moments of the blob are:
+\[
+\mu_{20} = \sum_{(x,y)\in C}(x-\bar{x})^2,\quad
+\mu_{02} = \sum_{(x,y)\in C}(y-\bar{y})^2,\quad
+\mu_{11} = \sum_{(x,y)\in C}(x-\bar{x})(y-\bar{y}).
+\]
+The \emph{inertia tensor} is:
+\begin{equation}
+\mathbf{M} =
+\begin{pmatrix}
+\mu_{02} & -\mu_{11} \\
+-\mu_{11} & \mu_{20}
+\end{pmatrix}.
+\label{eq:inertia}
+\end{equation}
+The eigenvalues $\lambda_{\min} \leq \lambda_{\max}$ of $\mathbf{M}$ give the minimum and
+maximum second moments of area (the squares of the semi-axes of the equivalent inertia
+ellipse).  The \emph{inertia ratio} is:
+\begin{equation}
+\rho = \frac{\lambda_{\min}}{\lambda_{\max}} \in [0,1].
+\label{eq:inertia_ratio}
+\end{equation}
+$\rho = 1$ for a circle; $\rho \to 0$ for a thin line.
+
+\subsection{Convexity Filter}
+
+Let $A_{\text{hull}}$ be the area of the convex hull of blob $C$.  The convexity is:
+\begin{equation}
+\text{conv} = \frac{A}{A_{\text{hull}}} \in (0,1].
+\label{eq:conv}
+\end{equation}
+A perfectly convex blob has $\text{conv} = 1$; concavities reduce it.
+
+%----------------------------------------------------------------------
+\section{TikZ Figures}
+%----------------------------------------------------------------------
+
+\subsection{Figure 1: SimpleBlobDetector Pipeline Flowchart}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  node distance=1.2cm and 0.6cm,
+  box/.style={rectangle, draw, rounded corners, minimum width=3cm, minimum height=0.7cm,
+              fill=blue!10, font=\small},
+  decision/.style={diamond, draw, fill=yellow!20, font=\small, aspect=2.5},
+  arrow/.style={-{Stealth}, thick}
+]
+\node[box] (input)   {Grayscale Image $I$};
+\node[box, below=of input] (thresh) {Threshold $\theta_k$ (Eq.~\ref{eq:sweep})};
+\node[box, below=of thresh] (cc)    {Connected Components\\ (Union-Find)};
+\node[box, below=of cc]    (cent)   {Centroid \& Radius\\ (Eq.~\ref{eq:centroid}--\ref{eq:radius})};
+\node[box, below=of cent]  (merge)  {Merge across levels\\ (Eq.~\ref{eq:merge})};
+\node[box, below=of merge] (filter) {Apply 5 Filters\\ (Color, Area, Circ, Inertia, Conv)};
+\node[box, below=of filter](output) {KeyPoint list};
+
+\draw[arrow] (input)  -- (thresh);
+\draw[arrow] (thresh) -- (cc);
+\draw[arrow] (cc)     -- (cent);
+\draw[arrow] (cent)   -- (merge);
+
+% Loop back for next threshold
+\coordinate (right) at ($(thresh.east)+(1.5,0)$);
+\draw[arrow] (merge.east) -- ++(0.8,0) |- node[right, font=\tiny]{next $\theta_k$} (thresh.east);
+
+\draw[arrow] (merge)  -- (filter);
+\draw[arrow] (filter) -- (output);
+\end{tikzpicture}
+\caption{SimpleBlobDetector pipeline.  The threshold sweep (top loop) feeds connected-component
+labeling; results from all levels are merged before the five filter stages.}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Figure 2: Inertia Ellipse}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+% Draw blob as irregular ellipse-ish shape
+\draw[fill=gray!20, draw=black!60] (0,0) ellipse (2.5cm and 1.2cm);
+% Centroid
+\filldraw[red] (0,0) circle (2pt) node[below right, font=\small]{$(\bar{x},\bar{y})$};
+% Major axis (lambda_max direction)
+\draw[-{Stealth}, thick, blue] (0,0) -- (2.5,0)
+    node[right, font=\small]{$\sqrt{\lambda_{\max}}$};
+% Minor axis (lambda_min direction)
+\draw[-{Stealth}, thick, red!80!black] (0,0) -- (0,1.2)
+    node[above, font=\small]{$\sqrt{\lambda_{\min}}$};
+% Brace on major axis
+\draw[decorate, decoration={brace, amplitude=5pt, mirror}]
+    (0,-0.15) -- (2.5,-0.15) node[midway, below=6pt, font=\small]{semi-major $a$};
+% Brace on minor axis
+\draw[decorate, decoration={brace, amplitude=5pt}]
+    (0.15,0) -- (0.15,1.2) node[midway, right=6pt, font=\small]{semi-minor $b$};
+% Inertia ratio annotation
+\node[draw, fill=white, font=\small] at (1.5, -1.8)
+    {$\rho = \dfrac{\lambda_{\min}}{\lambda_{\max}} = \left(\dfrac{b}{a}\right)^2$};
+\end{tikzpicture}
+\caption{The equivalent inertia ellipse of a blob.  Eigenvalues $\lambda_{\min}$ and
+$\lambda_{\max}$ of the inertia tensor $\mathbf{M}$ (Eq.~\ref{eq:inertia}) correspond
+to the squared semi-axes.  The inertia ratio $\rho$ measures elongation.}
+\label{fig:ellipse}
+\end{figure}
+
+%----------------------------------------------------------------------
+\section{Summary of Algorithm}
+%----------------------------------------------------------------------
+
+The full algorithm proceeds as follows:
+\begin{enumerate}
+\item For $k = 0$ to $K-1$: threshold at $\theta_k$, label connected components, compute
+      centroid $(\bar{x}, \bar{y})$ and radius $r$ (Eqs.~\ref{eq:centroid}--\ref{eq:radius}).
+\item Merge blobs across consecutive threshold levels using criterion~\eqref{eq:merge};
+      average center and radius over merged group (Eqs.~\ref{eq:merged_center}--\ref{eq:merged_radius}).
+\item Apply, in order: color filter \eqref{eq:color}, area filter \eqref{eq:area},
+      circularity filter \eqref{eq:circ}, inertia ratio filter \eqref{eq:inertia_ratio},
+      convexity filter \eqref{eq:conv}.
+\item Return surviving $(c^*, r^*)$ pairs as \texttt{cv::KeyPoint} objects.
+\end{enumerate}
+
+%----------------------------------------------------------------------
+\section*{References}
+%----------------------------------------------------------------------
+\begin{thebibliography}{9}
+
+\bibitem{opencv_blob}
+OpenCV Documentation, \textit{SimpleBlobDetector Class Reference},
+\url{https://docs.opencv.org/4.x/d0/d7a/classcv_1_1SimpleBlobDetector.html}, 2024.
+
+\bibitem{lienhart}
+R.~Lienhart and J.~Maydt,
+``An Extended Set of Haar-like Features for Rapid Object Detection,''
+\textit{Proc.\ ICIP}, vol.~1, pp.~900--903, 2002.
+
+\bibitem{haralick}
+R.~M.~Haralick and L.~G.~Shapiro,
+\textit{Computer and Robot Vision}, vol.~1,
+Addison-Wesley, Reading, MA, 1992.
+
+\bibitem{otsu}
+N.~Otsu,
+``A Threshold Selection Method from Gray-Level Histograms,''
+\textit{IEEE Trans.\ Systems, Man, Cybernetics}, vol.~9, no.~1, pp.~62--66, 1979.
+
+\end{thebibliography}
+
+\end{document}
