@@ -1,0 +1,152 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta, calc, matrix, positioning, backgrounds, decorations.pathreplacing}
+
+\begin{document}
+
+% ============================================================
+% Diagram: warpAffine INTER_AREA ignored bug & fix
+% Issue #21060
+% ============================================================
+\begin{tikzpicture}[
+    font=\small,
+    pixel/.style={draw, minimum size=1cm, inner sep=0pt, align=center, font=\footnotesize},
+    outputpix/.style={draw, minimum size=1.5cm, inner sep=0pt, align=center,
+                      font=\footnotesize, thick},
+    arrow/.style={-{Stealth[length=6pt]}, thick},
+    label style/.style={font=\footnotesize},
+]
+
+% ====================================================================
+% TITLE
+% ====================================================================
+\node[font=\large\bfseries] at (7, 0.5)
+    {warpAffine INTER\_AREA Bug \& Fix (Issue \#21060)};
+\node[font=\small\itshape, text=gray] at (7, 0)
+    {2x downscale: each output pixel should cover 4 source pixels};
+
+% ====================================================================
+% LEFT SIDE: INTER_LINEAR (the buggy behavior)
+% ====================================================================
+
+\node[font=\normalsize\bfseries, red!70] at (3, -0.8) {Before: INTER\_LINEAR (actual behavior)};
+\node[font=\footnotesize\itshape, red!50] at (3, -1.2) {You asked for INTER\_AREA — this is what you got};
+
+% 2x2 source grid
+\node[pixel, fill=blue!40]   (s00) at (1.5, -2.5) {$A$\\$128$};
+\node[pixel, fill=blue!20]   (s10) at (2.5, -2.5) {$B$\\$64$};
+\node[pixel, fill=blue!20]   (s01) at (1.5, -3.5) {$C$\\$200$};
+\node[pixel, fill=blue!10]   (s11) at (2.5, -3.5) {$D$\\$32$};
+
+\node[font=\footnotesize\bfseries] at (2, -1.9) {Source (4 pixels)};
+
+% Highlight: only A is sampled
+\draw[ultra thick, red!80] (1.0, -2.0) rectangle (2.0, -3.0);
+\node[font=\footnotesize, red!80, align=center] at (1.5, -4.1) {Only this pixel\\sampled!};
+
+% Arrow
+\draw[arrow, red!70] (3.2, -3.0) -- (4.0, -3.0);
+
+% Output pixel
+\node[outputpix, fill=blue!40] (o1) at (5.0, -3.0)
+    {$A$\\$= 128$};
+\node[font=\footnotesize\bfseries] at (5.0, -2.2) {Output};
+
+% B, C, D labels showing ignored
+\node[font=\footnotesize, gray, align=center] at (2.5, -4.1) {$B, C, D$\\ignored};
+\foreach \n in {s10,s01,s11} {
+    \draw[thin, gray!50, dashed] (\n) -- (4.6, -3.0);
+}
+
+% Aliasing warning box
+\node[draw, rounded corners, fill=red!8, align=center,
+      font=\footnotesize, inner sep=6pt] at (3.0, -5.2)
+{
+    \textbf{Result:} Output $= 128$ (just $A$) \\
+    $B{=}64$, $C{=}200$, $D{=}32$ are \textbf{discarded} \\
+    Aliasing artifacts possible!
+};
+
+% ====================================================================
+% DIVIDER
+% ====================================================================
+\draw[thick, gray!40, dashed] (7.0, -1.3) -- (7.0, -6.2);
+
+% ====================================================================
+% RIGHT SIDE: warpAffineAntiAliased (the fix)
+% ====================================================================
+
+\node[font=\normalsize\bfseries, green!60!black] at (11, -0.8)
+    {After: warpAffineAntiAliased() (the fix)};
+\node[font=\footnotesize\itshape, green!50!black] at (11, -1.2)
+    {Gaussian blur first, then warpAffine with INTER\_LINEAR};
+
+% 2x2 source grid (all highlighted)
+\node[pixel, fill=blue!40]   (t00) at (9.5, -2.5)  {$A$\\$128$};
+\node[pixel, fill=blue!20]   (t10) at (10.5, -2.5) {$B$\\$64$};
+\node[pixel, fill=blue!20]   (t01) at (9.5, -3.5)  {$C$\\$200$};
+\node[pixel, fill=blue!10]   (t11) at (10.5, -3.5) {$D$\\$32$};
+
+% All 4 highlighted in green
+\draw[ultra thick, green!60!black] (9.0, -2.0) rectangle (11.0, -4.0);
+\node[font=\footnotesize\bfseries] at (10, -1.9) {Source (4 pixels)};
+\node[font=\footnotesize, green!60!black, align=center] at (10, -4.4)
+    {All 4 used!};
+
+% Gaussian weights annotation
+\node[draw, rounded corners, fill=yellow!15, align=center,
+      font=\scriptsize, inner sep=4pt] at (10, -5.0)
+{
+    Gaussian weights: \\
+    $w_A{=}0.25,\; w_B{=}0.25$ \\
+    $w_C{=}0.25,\; w_D{=}0.25$ \\
+    (equal for 2x scale)
+};
+
+% Step 1: GaussianBlur arrow
+\draw[arrow, orange!80!black] (11.2, -3.0) -- (12.0, -3.0);
+\node[font=\footnotesize, orange!80!black, align=center] at (11.6, -2.7)
+    {Step 1:\\Blur};
+
+% Blurred pixel (intermediate)
+\node[pixel, fill=blue!28, minimum size=1cm] (blur) at (13.0, -3.0)
+    {blurred\\$106$};
+\node[font=\footnotesize\bfseries] at (13.0, -2.2) {After blur};
+
+% Step 2: warpAffine arrow
+\draw[arrow, green!60!black] (13.6, -3.0) -- (14.4, -3.0);
+\node[font=\footnotesize, green!60!black, align=center] at (14.0, -2.7)
+    {Step 2:\\warp};
+
+% Output pixel
+\node[outputpix, fill=blue!28] (o2) at (15.5, -3.0)
+    {\raisebox{0pt}{$\approx\!\frac{A{+}B{+}C{+}D}{4}$}\\$= 106$};
+\node[font=\footnotesize\bfseries] at (15.5, -2.2) {Output};
+
+% Anti-alias success box
+\node[draw, rounded corners, fill=green!8, align=center,
+      font=\footnotesize, inner sep=6pt] at (12.5, -5.6)
+{
+    \textbf{Result:} Output $\approx (128{+}64{+}200{+}32)/4 = 106$ \\
+    All source pixels contribute \\
+    \textbf{Smooth, anti-aliased output!}
+};
+
+% ====================================================================
+% BOTTOM: Summary comparison
+% ====================================================================
+\node[draw, rounded corners, fill=gray!8, align=left,
+      font=\footnotesize, inner sep=10pt, text width=13cm] at (7.5, -7.5)
+{
+    \textbf{Summary:} \\[4pt]
+    \texttt{warpAffine(src, dst, M, size, INTER\_AREA)} $\;\to\;$
+        silently used \texttt{INTER\_LINEAR} (bug — no warning, wrong output) \\[4pt]
+    \texttt{warpAffineAntiAliased(src, dst, M, size)} $\;\to\;$
+        GaussianBlur($\sigma \propto$ scale) + \texttt{warpAffine(..., INTER\_LINEAR)} \\[4pt]
+    The blur pre-mixes pixels that will be merged, approximating area averaging.
+};
+
+\end{tikzpicture}
+
+\end{document}
