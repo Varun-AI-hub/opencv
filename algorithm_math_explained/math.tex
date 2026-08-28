@@ -1,0 +1,311 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+\geometry{margin=1in}
+
+\title{Perspective-n-Point (PnP): DLT, EPnP, Iterative Refinement,\\and the Cheirality Constraint}
+\author{OpenCV Fix Branch: fix/issue-8813-solvepnp-rotation-complex}
+\date{\today}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+The Perspective-n-Point (PnP) problem asks: given $n$ 3-D world points
+$\{\mathbf{X}_i\}$ and their 2-D image projections $\{\mathbf{x}_i\}$, find the
+camera rotation $\mathbf{R}$ and translation $\mathbf{t}$ that best explain the
+observations. This document derives the full mathematics of the DLT, EPnP, and
+Levenberg--Marquardt approaches implemented in \texttt{cv::solvePnP}, together
+with a rigorous treatment of the cheirality constraint and the fix for the
+sign-flip bug addressed in this branch.
+
+\section{Camera Projection Model}
+
+\subsection{Homogeneous Projection}
+A 3-D point $\mathbf{X} = (X, Y, Z)^T$ is projected to the image plane by:
+\begin{equation}
+  \lambda \tilde{\mathbf{x}} = \mathbf{K} [\mathbf{R} \mid \mathbf{t}] \tilde{\mathbf{X}},
+  \qquad \lambda = Z_{\text{cam}} > 0,
+\end{equation}
+where $\tilde{\mathbf{x}} = (x, y, 1)^T$, $\tilde{\mathbf{X}} = (X, Y, Z, 1)^T$,
+and $\mathbf{K}$ is the calibration matrix:
+\begin{equation}
+  \mathbf{K} = \begin{pmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{pmatrix}.
+\end{equation}
+
+\subsection{Cheirality Condition}
+\begin{definition}[Cheirality]
+A 3-D point $\mathbf{X}$ satisfies the \emph{cheirality condition} with respect
+to camera $(\mathbf{R}, \mathbf{t})$ if and only if it lies in front of the
+camera:
+\begin{equation}
+  Z_{\text{cam}} = \mathbf{r}_3^T \mathbf{X} + t_3 > 0,
+\end{equation}
+where $\mathbf{r}_3$ is the third row of $\mathbf{R}$.
+\end{definition}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth,scale=1.1]
+  % Camera body
+  \draw[thick,fill=gray!20] (0,-0.5) rectangle (0.6,0.5);
+  \draw[thick,fill=gray!30] (0.6,-0.3) -- (1.2,0) -- (0.6,0.3) -- cycle;
+  \node at (0.3,0) {\small cam};
+  % Optical axis
+  \draw[->,gray,dashed] (1.2,0) -- (5.5,0) node[right] {optical axis};
+  % Point in front (green)
+  \filldraw[green!60!black] (4,1.5) circle (3pt) node[right,green!60!black] {$\mathbf{X}_+$: $Z_\text{cam}>0$};
+  \draw[green!60!black,->] (1.2,0) -- (4,1.5);
+  % Point behind (red)
+  \filldraw[red!70!black] (-2,1) circle (3pt) node[left,red!70!black] {$\mathbf{X}_-$: $Z_\text{cam}<0$};
+  \draw[red!70!black,->,dashed] (1.2,0) -- (-2,1);
+  % Image plane
+  \draw[blue,thick] (3,-1.5) -- (3,2.5) node[above,blue] {image plane};
+  % Projected point
+  \filldraw[green!60!black] (3,0.6) circle (2.5pt) node[right,font=\small] {$\mathbf{x}_+$};
+  % Depth label
+  \draw[<->,gray] (1.2,-1.2) -- (3,-1.2) node[midway,below,font=\small] {$f$};
+  \draw[<->,gray] (1.2,-1.8) -- (4,-1.8) node[midway,below,font=\small] {$Z_\text{cam}$};
+\end{tikzpicture}
+\caption{Cheirality. A point $\mathbf{X}_+$ in front of the camera ($Z_\text{cam}>0$)
+projects to a valid image point. A point $\mathbf{X}_-$ behind the camera
+($Z_\text{cam}<0$) does not produce a physical image and violates cheirality.}
+\end{figure}
+
+\section{Direct Linear Transform (DLT)}
+
+\subsection{Linear System Formulation}
+Let $\mathbf{M} = \mathbf{K}[\mathbf{R}|\mathbf{t}]$ be the $3\times4$ projection
+matrix. For the $i$-th point correspondence:
+\begin{equation}
+  \lambda_i \begin{pmatrix}x_i\\y_i\\1\end{pmatrix} =
+  \mathbf{M} \tilde{\mathbf{X}}_i =
+  \begin{pmatrix} \mathbf{m}_1^T \\ \mathbf{m}_2^T \\ \mathbf{m}_3^T \end{pmatrix}
+  \tilde{\mathbf{X}}_i.
+\end{equation}
+Eliminating $\lambda_i$ by cross-product $\tilde{\mathbf{x}}_i \times (\mathbf{M}\tilde{\mathbf{X}}_i) = \mathbf{0}$:
+\begin{equation}
+  \begin{pmatrix}
+    \mathbf{0}^T & -\tilde{\mathbf{X}}_i^T & y_i\tilde{\mathbf{X}}_i^T \\
+    \tilde{\mathbf{X}}_i^T & \mathbf{0}^T & -x_i\tilde{\mathbf{X}}_i^T
+  \end{pmatrix}
+  \text{vec}(\mathbf{M}) = \mathbf{0}.
+\end{equation}
+Stacking $n \geq 6$ such equations gives $\mathbf{A}\mathbf{p} = \mathbf{0}$
+with $\mathbf{A} \in \mathbb{R}^{2n \times 12}$.
+
+\subsection{SVD Solution}
+\begin{theorem}
+The least-squares solution to $\|\mathbf{A}\mathbf{p}\|^2$ subject to
+$\|\mathbf{p}\|=1$ is the right singular vector of $\mathbf{A}$ corresponding to
+the smallest singular value.
+\end{theorem}
+\begin{proof}
+By the Eckart--Young theorem, the minimum is achieved by the last column of $\mathbf{V}$
+in the SVD $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^T$.
+\end{proof}
+
+\subsection{Enforcing $\mathbf{R} \in SO(3)$}
+The recovered matrix $\hat{\mathbf{R}}$ from the DLT need not be a rotation. Project
+onto $SO(3)$ via SVD: if $\hat{\mathbf{R}} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^T$,
+then
+\begin{equation}
+  \mathbf{R}^* = \mathbf{U} \begin{pmatrix}1&0&0\\0&1&0\\0&0&\det(\mathbf{UV}^T)\end{pmatrix} \mathbf{V}^T.
+\end{equation}
+
+\section{EPnP: Efficient PnP}
+
+\subsection{Control Point Representation}
+EPnP \cite{lepetit2009} represents all 3-D points as a weighted sum of four
+control points $\{\mathbf{c}_j\}_{j=1}^4$:
+\begin{equation}
+  \mathbf{X}_i = \sum_{j=1}^4 \alpha_{ij} \mathbf{c}_j, \qquad
+  \sum_{j=1}^4 \alpha_{ij} = 1.
+\end{equation}
+The control points are chosen as the centroid plus three principal-component
+directions of the point cloud. The barycentric coordinates $\alpha_{ij}$ are
+unique and computed once.
+
+\subsection{Projection in Control-Point Coordinates}
+Let $\mathbf{c}_j^c = \mathbf{R}\mathbf{c}_j + \mathbf{t}$ be the camera-frame
+control points. Then the projection equation becomes:
+\begin{equation}
+  w_i \begin{pmatrix}x_i\\y_i\\1\end{pmatrix} =
+  \mathbf{K} \sum_{j=1}^4 \alpha_{ij} \mathbf{c}_j^c.
+\end{equation}
+Expanding and eliminating the scale $w_i$:
+\begin{equation}
+  \mathbf{M}_i \mathbf{x} = \mathbf{0}, \quad
+  \mathbf{x} = \begin{pmatrix}\mathbf{c}_1^{c\,T} & \mathbf{c}_2^{c\,T} & \mathbf{c}_3^{c\,T} & \mathbf{c}_4^{c\,T}\end{pmatrix}^T \in \mathbb{R}^{12}.
+\end{equation}
+Stacking all $n$ points: $\mathbf{M}\mathbf{x} = \mathbf{0}$ with $\mathbf{M} \in \mathbb{R}^{2n\times12}$; solved by SVD in $O(n)$ time.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth,scale=1.0]
+  % Control points
+  \filldraw[red!80!black] (0,0) circle (4pt) node[below left] {$\mathbf{c}_1$ (centroid)};
+  \filldraw[blue!70!black] (3,0.5) circle (3pt) node[right] {$\mathbf{c}_2$};
+  \filldraw[blue!70!black] (0.5,2.5) circle (3pt) node[above] {$\mathbf{c}_3$};
+  \filldraw[blue!70!black] (1,0.8) circle (3pt) node[above right] {$\mathbf{c}_4$};
+  % Point as convex combination
+  \filldraw[green!60!black] (1.4,1.1) circle (3.5pt) node[right,green!60!black] {$\mathbf{X}_i = \sum \alpha_{ij}\mathbf{c}_j$};
+  % Arrows from control points to Xi
+  \draw[gray!60,->] (0,0) -- (1.3,1.0);
+  \draw[gray!60,->] (3,0.5) -- (1.5,1.1);
+  \draw[gray!60,->] (0.5,2.5) -- (1.4,1.2);
+  \draw[gray!60,->] (1,0.8) -- (1.38,1.08);
+  % Barycentric label
+  \node[font=\small,gray] at (2.5,2.2) {$\alpha_{i1}+\alpha_{i2}+\alpha_{i3}+\alpha_{i4}=1$};
+  % Axes (PCA directions)
+  \draw[->,thick,blue!50] (0,0) -- (2,0.3) node[right,font=\small] {PC1};
+  \draw[->,thick,green!50!black] (0,0) -- (0.2,1.8) node[above,font=\small] {PC2};
+\end{tikzpicture}
+\caption{EPnP control points. The four control points $\{\mathbf{c}_j\}$ consist
+of the centroid $\mathbf{c}_1$ and three PCA-direction points. Each scene point
+$\mathbf{X}_i$ is expressed as a barycentric combination with precomputed
+weights $\alpha_{ij}$.}
+\end{figure}
+
+\section{Iterative Refinement via Levenberg--Marquardt}
+
+\subsection{Reprojection Error}
+The gold standard is to minimise the total reprojection error:
+\begin{equation}
+  E(\mathbf{R}, \mathbf{t}) = \sum_{i=1}^n \left\|\mathbf{x}_i - \pi(\mathbf{R}\mathbf{X}_i + \mathbf{t})\right\|^2,
+\end{equation}
+where $\pi(\mathbf{Y}) = (Y_1/Y_3,\, Y_2/Y_3)^T$ is the perspective division.
+
+\subsection{Lie Algebra Parameterisation}
+To maintain the $SO(3)$ constraint during optimisation, $\mathbf{R}$ is
+parameterised via its Lie algebra $\mathfrak{so}(3)$: the incremental rotation is
+$\mathbf{R} \leftarrow \mathbf{R}\exp([\boldsymbol{\delta\omega}]_\times)$, so the
+parameter vector is $\boldsymbol{\xi} = (\boldsymbol{\delta\omega}, \boldsymbol{\delta t}) \in \mathbb{R}^6$.
+
+\subsection{Levenberg--Marquardt Update}
+The LM update rule is:
+\begin{equation}
+  \left(\mathbf{J}^T \mathbf{J} + \lambda \mathbf{I}\right) \Delta\boldsymbol{\xi} = \mathbf{J}^T \mathbf{r},
+\end{equation}
+where $\mathbf{r} = [(\mathbf{x}_1 - \hat{\mathbf{x}}_1)^T, \ldots, (\mathbf{x}_n - \hat{\mathbf{x}}_n)^T]^T$
+is the residual vector and $\mathbf{J}$ is the $2n\times6$ Jacobian:
+\begin{equation}
+  \mathbf{J}_i = \frac{\partial}{\partial\boldsymbol{\xi}} \pi(\mathbf{R}\mathbf{X}_i + \mathbf{t})
+  = \frac{1}{Z_i}\begin{pmatrix}f_x & 0 & -f_x X_i^c/Z_i & -f_x X_i^c Y_i^c/Z_i & f_x(1+(X_i^c/Z_i)^2) & -f_x Y_i^c/Z_i \\ 0 & f_y & -f_y Y_i^c/Z_i & -f_y(1+(Y_i^c/Z_i)^2) & f_y X_i^c Y_i^c/Z_i & f_y X_i^c/Z_i\end{pmatrix},
+\end{equation}
+where $(X_i^c, Y_i^c, Z_i^c)^T = \mathbf{R}\mathbf{X}_i + \mathbf{t}$.
+
+The damping parameter $\lambda$ is increased (gradient descent mode, stable but slow)
+when the step increases $E$, and decreased (Gauss--Newton mode, fast quadratic convergence)
+when the step decreases $E$.
+
+\section{Two Solutions and the Cheirality Fix}
+
+\subsection{Ambiguity in PnP}
+The DLT and linear PnP solvers produce two geometrically valid solutions
+$(\mathbf{R}, \mathbf{t})$ and $(-\mathbf{R}, -\mathbf{t})$ due to the
+homogeneous nature of the equation. These correspond to the point cloud being
+in front of or behind the camera.
+
+\begin{proposition}
+If $(\mathbf{R}, \mathbf{t})$ is a solution to the linear PnP system, then
+$(-\mathbf{R}, -\mathbf{t})$ is also a solution (same reprojection error).
+\end{proposition}
+
+\subsection{Cheirality Test}
+To select the physically correct solution, count the number of points with
+positive camera-frame depth:
+\begin{equation}
+  n_+ = \left|\left\{i : \mathbf{r}_3^T \mathbf{X}_i + t_3 > 0\right\}\right|.
+\end{equation}
+The correct solution has $n_+ \approx n$. The function \texttt{countPositiveDepths()}
+computes $n_+$ for both candidates and selects the one with larger $n_+$.
+
+\subsection{The Bug and Fix}
+The bug in this issue: after the linear solve, the code checked cheirality but
+failed to propagate the sign flip to the returned rotation matrix. Specifically,
+\texttt{applyCheiralityFix()} would negate $\mathbf{t}$ but not $\mathbf{R}$,
+producing a rotation--translation pair that is internally inconsistent.
+
+The correct fix applies the sign flip to both simultaneously:
+\begin{equation}
+  \text{if } n_+ < n/2: \quad \mathbf{R} \leftarrow -\mathbf{R},\quad \mathbf{t} \leftarrow -\mathbf{t}.
+\end{equation}
+After the flip, both $\mathbf{R}$ and $\mathbf{t}$ are negated, but note that
+$-\mathbf{R} \notin SO(3)$ (its determinant is $-1$). The proper operation is:
+\begin{equation}
+  \mathbf{R} \leftarrow \mathbf{R}\begin{pmatrix}-1&0&0\\0&-1&0\\0&0&1\end{pmatrix},
+  \quad
+  \mathbf{t} \leftarrow -\mathbf{t},
+\end{equation}
+which keeps $\det(\mathbf{R})=+1$ while reversing the $x$-$y$ orientation
+(equivalent to a $180^\circ$ rotation about $z$) and reflects the translation.
+The final check via Rodrigues' formula and \texttt{cv::projectPoints} validates
+that reprojection error decreases.
+
+\section{RANSAC Wrapper}
+
+When outliers are present, \texttt{solvePnPRansac} wraps any PnP solver in the
+RANSAC framework \cite{fischler1981}:
+\begin{enumerate}
+  \item Randomly sample a minimal set ($s=4$ for DLT, $s=3$ for P3P).
+  \item Compute hypothesis $(\mathbf{R}, \mathbf{t})$.
+  \item Count inliers: $|\{i : \|\mathbf{x}_i - \pi(\mathbf{R}\mathbf{X}_i+\mathbf{t})\|^2 < \epsilon^2\}|$.
+  \item Repeat $N_{\text{iter}}$ times; keep best hypothesis.
+  \item Refine on inlier set with LM.
+\end{enumerate}
+The required number of iterations to achieve probability $p$ of finding an
+all-inlier sample (inlier fraction $\omega$, sample size $s$) is:
+\begin{equation}
+  N_{\text{iter}} = \frac{\log(1-p)}{\log(1-\omega^s)}.
+\end{equation}
+
+\section{Summary}
+
+This document derived:
+\begin{enumerate}
+  \item The DLT linear PnP formulation and SVD solution with $SO(3)$ projection.
+  \item EPnP's $O(n)$ control-point representation and its SVD solve.
+  \item Levenberg--Marquardt iterative refinement over $SE(3)$ parameterised via
+        Lie algebra.
+  \item The cheirality constraint and the correct sign-flip fix applied to both
+        $\mathbf{R}$ and $\mathbf{t}$ simultaneously.
+\end{enumerate}
+
+\begin{thebibliography}{9}
+\bibitem{lepetit2009}
+  V.\ Lepetit, F.\ Moreno-Noguer, and P.\ Fua,
+  ``EPnP: An Accurate $O(n)$ Solution to the PnP Problem,''
+  \textit{International Journal of Computer Vision}, vol.\ 81, pp.\ 155--166, 2009.
+
+\bibitem{fischler1981}
+  M.\ A.\ Fischler and R.\ C.\ Bolles,
+  ``Random Sample Consensus: A Paradigm for Model Fitting with Applications to
+  Image Analysis and Automated Cartography,''
+  \textit{Communications of the ACM}, vol.\ 24, no.\ 6, pp.\ 381--395, 1981.
+
+\bibitem{opencv_pnp}
+  OpenCV Development Team,
+  \textit{cv::solvePnP documentation},
+  \url{https://docs.opencv.org/master/d9/d0c/group__calib3d.html}, 2024.
+
+\bibitem{hartley2003}
+  R.\ Hartley and A.\ Zisserman,
+  \textit{Multiple View Geometry in Computer Vision}, 2nd ed.
+  Cambridge University Press, 2003.
+\end{thebibliography}
+
+\end{document}
