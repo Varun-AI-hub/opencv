@@ -1,0 +1,42 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  node distance=1.4cm and 1.8cm,
+  modebox/.style={rectangle, rounded corners=4pt, minimum width=3cm, minimum height=1.2cm,
+                  text centered, draw=black, font=\small\bfseries},
+  smallbox/.style={rectangle, rounded corners=3pt, minimum width=3cm, minimum height=0.85cm,
+                   text centered, draw=black, font=\small},
+  arrow/.style={-Stealth, thick}
+]
+
+%% --- Three mode boxes ---
+\node[modebox, fill=blue!20]  (rgb)    at (0,0)    {RGB mode\\(color only)};
+\node[modebox, fill=gray!20]  (depth)  at (4.5,0)  {DEPTH mode\\(depth only)};
+\node[modebox, fill=purple!20](both)   at (9,0)    {RGB+DEPTH\\(both)};
+
+%% --- checkmarks below DEPTH and BOTH ---
+\node[smallbox, fill=green!20, below=1.2cm of depth] (dok)  {works fine ✓};
+\node[smallbox, fill=green!20, below=1.2cm of both]  (bok)  {works fine ✓};
+\draw[arrow] (depth) -- (dok);
+\draw[arrow] (both)  -- (bok);
+
+%% --- BEFORE path (crash) ---
+\node[smallbox, fill=red!30, below=1.2cm of rgb] (crash)
+     {\texttt{assert(!depth.empty())}\\CRASH  ✗};
+\draw[arrow, red, thick] (rgb) -- (crash);
+\node[font=\small\bfseries, text=red, left=0.2cm of crash] {BEFORE};
+
+%% --- AFTER path (fixed) ---
+\node[smallbox, fill=green!20, below=1.4cm of crash] (fixed)
+     {depth check skipped ✓};
+\draw[arrow, green!60!black, thick] (rgb.south) -- ++(0,-0.3) -- ++(1.5,0) -- ++(0,-3.4) -- (fixed.east);
+\node[font=\small\bfseries, text=green!60!black, left=0.2cm of fixed] {AFTER};
+
+%% --- Title ---
+\node[font=\large\bfseries, above=0.8cm of depth] {RGB Odometry Assertion Fix --- Issue \#23103};
+
+\end{tikzpicture}
+\end{document}
