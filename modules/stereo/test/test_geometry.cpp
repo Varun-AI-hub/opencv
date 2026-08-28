@@ -226,6 +226,53 @@ TEST(StereoGeometry, regression_23305)
     EXPECT_EQ(cv::norm(P2, P2_gold), 0.);
 }
 
+// Regression test for issue #7240: stereoRectify returns too narrow FoV.
+// With alpha=1 and zero-distortion cameras the valid ROI must cover at least
+// 95% of the output image area. The bug was an off-by-one in cvFloor(width*s)
+// vs cvFloor(right_edge) - cvCeil(left_edge) + 1.
+TEST(StereoGeometry, issue_7240_fov_alpha1)
+{
+    // Identical pinhole cameras, zero distortion, small horizontal baseline.
+    const Matx33d M1(800., 0., 319.5,
+                     0., 800., 239.5,
+                     0.,    0.,    1.);
+    const Matx33d M2 = M1;
+    const Matx<double, 5, 1> D1(0., 0., 0., 0., 0.);
+    const Matx<double, 5, 1> D2 = D1;
+
+    // A tiny convergence rotation between cameras (0.5 degree toe-in each).
+    const double angle = 0.5 * CV_PI / 180.0;
+    const Matx33d R(
+         std::cos(angle*2), 0., std::sin(angle*2),
+         0.,                1.,               0.,
+        -std::sin(angle*2), 0., std::cos(angle*2));
+    const Matx31d T(-100., 0., 0.);   // 100 mm baseline
+
+    const Size imageSize(640, 480);
+
+    Mat R1, R2, P1, P2, Q;
+    Rect roi1, roi2;
+    stereoRectify(M1, D1, M2, D2, imageSize, R, T,
+                  R1, R2, P1, P2, Q,
+                  STEREO_ZERO_DISPARITY, 1.0, imageSize, &roi1, &roi2);
+
+    const int totalPixels = imageSize.area();
+    EXPECT_GE(roi1.area(), static_cast<int>(totalPixels * 0.95))
+        << "roi1=" << roi1 << " expected at least 95% of " << totalPixels;
+    EXPECT_GE(roi2.area(), static_cast<int>(totalPixels * 0.95))
+        << "roi2=" << roi2 << " expected at least 95% of " << totalPixels;
+
+    // Sanity: ROI must lie inside the image.
+    EXPECT_GE(roi1.x, 0);
+    EXPECT_GE(roi1.y, 0);
+    EXPECT_LE(roi1.x + roi1.width,  imageSize.width);
+    EXPECT_LE(roi1.y + roi1.height, imageSize.height);
+    EXPECT_GE(roi2.x, 0);
+    EXPECT_GE(roi2.y, 0);
+    EXPECT_LE(roi2.x + roi2.width,  imageSize.width);
+    EXPECT_LE(roi2.y + roi2.height, imageSize.height);
+}
+
 class fisheyeTest : public ::testing::Test {
 
 protected:

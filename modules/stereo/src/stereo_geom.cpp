@@ -290,22 +290,29 @@ void stereoRectify( InputArray _cameraMatrix1, InputArray _distCoeffs1,
 
     if(roi1)
     {
-        *roi1 =
-            cv::Rect(cvCeil((inner1.x - cx1_0)*s + cx1),
-                     cvCeil((inner1.y - cy1_0)*s + cy1),
-                     cvFloor(inner1.width*s), cvFloor(inner1.height*s))
-            & cv::Rect(0, 0, newImgSize.width, newImgSize.height)
-        ;
+        // Use separate floor(right_edge) and ceil(left_edge) rather than
+        // floor(width * s) to avoid the off-by-one error that occurs when
+        // frac(right_edge) < frac(left_edge) (issue #7240).
+        int roi1_x      = cvCeil ((inner1.x - cx1_0)*s + cx1);
+        int roi1_y      = cvCeil ((inner1.y - cy1_0)*s + cy1);
+        int roi1_right  = cvFloor((inner1.x + inner1.width  - cx1_0)*s + cx1);
+        int roi1_bottom = cvFloor((inner1.y + inner1.height - cy1_0)*s + cy1);
+        *roi1 = cv::Rect(roi1_x, roi1_y,
+                         roi1_right  - roi1_x + 1,
+                         roi1_bottom - roi1_y + 1)
+                & cv::Rect(0, 0, newImgSize.width, newImgSize.height);
     }
 
     if(roi2)
     {
-        *roi2 =
-            cv::Rect(cvCeil((inner2.x - cx2_0)*s + cx2),
-                     cvCeil((inner2.y - cy2_0)*s + cy2),
-                     cvFloor(inner2.width*s), cvFloor(inner2.height*s))
-            & cv::Rect(0, 0, newImgSize.width, newImgSize.height)
-        ;
+        int roi2_x      = cvCeil ((inner2.x - cx2_0)*s + cx2);
+        int roi2_y      = cvCeil ((inner2.y - cy2_0)*s + cy2);
+        int roi2_right  = cvFloor((inner2.x + inner2.width  - cx2_0)*s + cx2);
+        int roi2_bottom = cvFloor((inner2.y + inner2.height - cy2_0)*s + cy2);
+        *roi2 = cv::Rect(roi2_x, roi2_y,
+                         roi2_right  - roi2_x + 1,
+                         roi2_bottom - roi2_y + 1)
+                & cv::Rect(0, 0, newImgSize.width, newImgSize.height);
     }
     }
 
