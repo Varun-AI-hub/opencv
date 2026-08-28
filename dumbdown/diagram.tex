@@ -1,0 +1,99 @@
+\documentclass[tikz,border=12pt]{standalone}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,decorations.pathreplacing}
+
+\begin{document}
+\begin{tikzpicture}[font=\small]
+
+%% ===== TITLE =====
+\node[font=\bfseries\large] at (5.5, 9.5)
+  {Fisheye Newton Iteration -- NaN Bug \& Fix};
+
+%% ===== LEFT PANEL: THE BUG =====
+\node[font=\bfseries, red] at (2.5, 9.0) {THE BUG (k1 = -1/3, \(\theta=1\))};
+
+% Axes
+\draw[-{Stealth}] (-0.3, 5.0) -- (5.2, 5.0) node[right] {$\theta$};
+\draw[-{Stealth}] (0.0, 4.7) -- (0.0, 8.8) node[above] {$f(\theta)$};
+
+% Flat curve at theta=1 (simulate zero slope)
+\draw[blue!70, thick, domain=0.2:4.5, samples=60]
+  plot (\x, {5.0 + 1.5*sin((\x-1.0)*50)/(1+(\x-1.0)*(\x-1.0)*4)});
+
+% Flat tangent line at theta=1.0
+\draw[red, very thick] (0.4, 6.5) -- (2.6, 6.5)
+  node[right, font=\footnotesize, red] {tangent slope = 0};
+
+% Mark theta_0
+\fill[black] (1.5, 5.0) circle (0.06);
+\node[below, font=\footnotesize] at (1.5, 5.0) {$\theta_0 = 1.0$};
+\draw[dashed, gray] (1.5, 5.0) -- (1.5, 6.5);
+\fill[red] (1.5, 6.5) circle (0.08);
+
+% Arrow shooting to infinity
+\draw[-{Stealth}, red, ultra thick] (1.5, 6.5) -- (5.0, 8.5)
+  node[right, align=left, font=\footnotesize, red]
+  {Newton step:\\$\theta \leftarrow \theta - \dfrac{f(\theta)}{0} = \pm\infty$};
+
+% NaN label
+\node[draw=red, fill=red!15, rounded corners, font=\bfseries\small,
+      align=center, inner sep=5pt] at (2.5, 3.8)
+  {\textcolor{red}{NaN}\\{\footnotesize infinity $\to$ more math $\to$ NaN}};
+\draw[-{Stealth}, red] (2.5, 4.2) -- (2.5, 4.6);
+
+%% ===== DIVIDER =====
+\draw[gray, thick, dashed] (5.8, 3.4) -- (5.8, 9.2);
+
+%% ===== RIGHT PANEL: THE FIX =====
+\node[font=\bfseries, green!60!black] at (9.5, 9.0) {THE FIX (safety gate)};
+
+% Axes
+\draw[-{Stealth}] (6.5, 5.0) -- (12.5, 5.0) node[right] {$\theta$};
+\draw[-{Stealth}] (7.0, 4.7) -- (7.0, 8.8) node[above] {$f(\theta)$};
+
+% Same curve
+\draw[blue!70, thick, domain=0.2:4.5, samples=60]
+  plot ({\x+6.8}, {5.0 + 1.5*sin((\x-1.0)*50)/(1+(\x-1.0)*(\x-1.0)*4)});
+
+% Flat tangent
+\draw[orange, thick] (7.4, 6.5) -- (9.6, 6.5)
+  node[right, font=\footnotesize, orange] {slope $\approx 0$};
+
+\fill[black] (8.5, 5.0) circle (0.06);
+\node[below, font=\footnotesize] at (8.5, 5.0) {$\theta_0$};
+\draw[dashed, gray] (8.5, 5.0) -- (8.5, 6.5);
+\fill[orange] (8.5, 6.5) circle (0.08);
+
+% Safety gate box
+\node[draw=green!60!black, fill=green!10, rounded corners,
+      minimum width=3.5cm, minimum height=1.2cm,
+      align=center, font=\footnotesize, thick] (gate) at (9.5, 7.8)
+  {\textbf{Safety Check}\\
+   if $|f'(\theta)| < \varepsilon$:\\
+   \quad skip step (keep $\theta$)};
+
+\draw[-{Stealth}, green!60!black, thick] (8.5, 6.7) -- (gate.south);
+
+% Arrow: theta stays the same
+\draw[-{Stealth}, green!60!black, thick] (gate.east) -- ++(1.5, 0)
+  node[right, align=left, font=\footnotesize, green!60!black]
+  {$\theta$ unchanged\\for this step};
+
+% Next iteration convergence
+\node[draw=green!60!black, fill=green!10, rounded corners,
+      font=\footnotesize, align=center, inner sep=5pt] at (9.5, 3.8)
+  {\textcolor{green!60!black}{\textbf{Safe!}}\\
+   {\footnotesize iteration stalls once,\\then converges normally.\\No NaN.}};
+
+%% ===== FORMULA BOX AT BOTTOM =====
+\node[draw, rounded corners, fill=yellow!10, align=center,
+      font=\footnotesize, inner sep=8pt] at (5.8, 2.5)
+  {Newton step: $\theta_{\text{new}} = \theta - \dfrac{f(\theta)}{f'(\theta)}$
+   \quad where \quad
+   $f'(\theta) = 1 + 3k_1\theta^2 + 5k_2\theta^4 + \cdots$\\[4pt]
+   Bug condition: $k_1 = -\tfrac{1}{3},\ \theta=1 \Rightarrow
+   f'(1) = 1 + 3\!\cdot\!(-\tfrac{1}{3})\!\cdot\!1 = 0$};
+
+\end{tikzpicture}
+\end{document}
