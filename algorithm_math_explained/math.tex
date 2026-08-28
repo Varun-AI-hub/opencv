@@ -1,0 +1,298 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+
+\geometry{margin=1in}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+
+\lstset{basicstyle=\ttfamily\small, frame=single, language=C++}
+
+\title{\textbf{Morphological Dilation: Set Theory, Max-Filters,\\
+and the \texttt{CV\_Bool} Kernel Type Issue}\\
+\large Mathematical Documentation for OpenCV Issue \#29798}
+\author{OpenCV Fix Branch: \texttt{fix/issue-29798-dilate-cvbool}}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%-----------------------------------------------------------------------
+\section{Introduction}
+
+Morphological dilation is one of the two fundamental operations of
+mathematical morphology (the other being erosion).  OpenCV's
+\texttt{dilate()} function implements dilation for binary and
+grayscale images using configurable structuring elements.
+
+Issue \#29798 was triggered when a user supplied a kernel (structuring
+element) of type \texttt{CV\_Bool}.  The internal assertion
+\texttt{CV\_Assert(kernel.depth() == CV\_8U)} fired, crashing the
+application.  This document provides the full mathematical background
+and explains how the type conversion resolves the issue.
+
+%-----------------------------------------------------------------------
+\section{Mathematical Morphology Fundamentals}
+
+\subsection{Image and Structuring Element}
+
+Let the discrete domain be $\mathbb{Z}^2$.  We work with:
+\begin{itemize}
+  \item A \textbf{grayscale image} $f : \mathbb{Z}^2 \to \{0, \ldots, 255\}$, or
+  \item A \textbf{binary image} $A \subseteq \mathbb{Z}^2$ (the foreground set).
+  \item A \textbf{structuring element} $B \subset \mathbb{Z}^2$: a compact
+        (finite) set of offset vectors, often centred at the origin.
+\end{itemize}
+
+\subsection{Erosion}
+
+\begin{definition}[Grayscale Erosion]
+\[
+  (f \ominus B)(x) = \min_{b \in B} f(x + b)
+\]
+\end{definition}
+
+\begin{definition}[Binary Erosion]
+\[
+  A \ominus B = \{x \in \mathbb{Z}^2 : B_x \subseteq A\}
+\]
+where $B_x = \{x + b : b \in B\}$ is the translate of $B$ to $x$.
+\end{definition}
+
+\subsection{Dilation}
+
+\begin{definition}[Grayscale Dilation]
+\[
+  (f \oplus B)(x) = \max_{b \in B} f(x - b)
+\]
+Note the reflection: $b$ is negated (we use the \emph{reflected} SE
+$\hat{B} = \{-b : b \in B\}$).  For symmetric SEs, $\hat{B} = B$.
+\end{definition}
+
+\begin{definition}[Binary Dilation / Minkowski Sum]
+\[
+  A \oplus B = \{a + b : a \in A,\, b \in B\}
+\]
+This is the Minkowski sum of $A$ and $B$.
+\end{definition}
+
+\begin{proposition}[Dilation as OR-Filter]
+For a binary image with all-ones rectangular SE $B$ of radius $r$:
+\[
+  (A \oplus B)(x, y) = \bigvee_{(dx, dy) \in B} A(x + dx,\, y + dy)
+\]
+i.e., a pixel is in the output iff at least one pixel in its
+$B$-neighbourhood is in the input foreground.
+\end{proposition}
+
+%-----------------------------------------------------------------------
+\section{Dilation as a Max-Filter}
+
+For grayscale images, dilation is a \emph{maximum filter}:
+\[
+  \text{dilate}(f)(x, y) = \max_{(dx, dy) \in B} f(x + dx,\, y + dy)
+\]
+
+\noindent\textbf{Interpretation:} each output pixel takes the maximum
+value from its neighbourhood defined by the structuring element.  This
+is the discrete analogue of a \emph{supremum convolution} (also called
+\emph{morphological convolution} or \emph{sup-convolution}):
+\[
+  (f \oplus g)(x) = \sup_{b} [f(b) + g(x - b)]
+\]
+with $g$ being the indicator of $B$ (0 inside, $-\infty$ outside) in
+the ($\max, +$) semiring.
+
+%-----------------------------------------------------------------------
+\section{Decomposition and Separability}
+
+\begin{theorem}[Separability of Rectangular SE]
+Let $B = B_h \oplus B_v$ where $B_h = \{(-r,0),\ldots,(r,0)\}$ and
+$B_v = \{(0,-r),\ldots,(0,r)\}$.  Then:
+\[
+  f \oplus B = (f \oplus B_h) \oplus B_v
+\]
+\end{theorem}
+
+\noindent\textbf{Complexity Reduction:}
+\begin{align*}
+  \text{Direct ($r\times r$ SE):} &\quad O(W H r^2) \\
+  \text{Separable (two 1-D passes):} &\quad O(W H r)
+\end{align*}
+
+For a $1920 \times 1080$ image with $r = 10$, separable is $10\times$
+faster ($\approx 2 \times 10^8$ vs.\ $2 \times 10^9$ operations).
+
+OpenCV uses separable processing internally for rectangular structuring
+elements, and a general max-filter for arbitrary SEs.
+
+%-----------------------------------------------------------------------
+\section{The \texttt{CV\_Bool} Type Issue}
+
+\subsection{Type Codes in OpenCV}
+
+OpenCV represents matrix element types as integer codes.  The relevant
+ones here are:
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Constant} & \textbf{Value} & \textbf{Meaning} \\
+\hline
+\texttt{CV\_Bool} & 1  & 1-bit boolean (true/false) \\
+\texttt{CV\_8U}   & 0  & 8-bit unsigned integer (uint8\_t) \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{The Crash}
+
+OpenCV's morphological dilation implementation expects kernel data to
+be of type \texttt{CV\_8U} (uint8).  The internal check was:
+\begin{lstlisting}
+CV_Assert(kernel.depth() == CV_8U);
+\end{lstlisting}
+
+A \texttt{CV\_Bool} kernel has \texttt{depth() == CV\_Bool} (= 1),
+not \texttt{CV\_8U} (= 0), so the assertion fires.
+
+\subsection{Mathematical Equivalence}
+
+A boolean structuring element and a uint8 structuring element encode
+the same information:
+\[
+  b_{\text{bool}} \in \{\text{false}, \text{true}\}
+  \;\longleftrightarrow\;
+  b_{\text{uint8}} \in \{0, 1\}
+\]
+
+The conversion is trivially correct:
+\[
+  \text{false} \mapsto 0, \quad \text{true} \mapsto 1
+\]
+and the dilation max-filter is unchanged since we only query
+\emph{membership} of offsets in $B$ (non-zero = in $B$,
+zero = not in $B$).
+
+\subsection{The Fix}
+
+\begin{lstlisting}
+// Before calling morphological kernel check:
+if (kernel.depth() == CV_Bool) {
+    kernel.convertTo(kernel, CV_8U);
+}
+\end{lstlisting}
+
+\noindent Mathematically:
+\[
+  B_{\text{CV\_Bool}}(i,j) \in \{0,1\} \xrightarrow{\times 1} B_{\text{CV\_8U}}(i,j) \in \{0,1\}
+\]
+
+%-----------------------------------------------------------------------
+\section{TikZ Figures}
+
+\subsection{Figure 1: Dilation Example — 5$\times$5 Input, 3$\times$3 SE}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.75]
+
+% Input grid 5x5
+\def\inp{
+  {0,0,0,0,0},
+  {0,1,1,0,0},
+  {0,1,1,0,0},
+  {0,0,0,0,0},
+  {0,0,0,0,0}
+}
+\foreach \row in {0,...,4} {
+  \foreach \col in {0,...,4} {
+    \pgfmathsetmacro{\val}{\inp[\row][\col]}
+    \pgfmathsetmacro{\colr}{ifthenelse(\val>0.5,"blue!30","white")}
+    \node[draw, minimum size=0.75cm, fill=\colr, font=\tiny] at (\col*0.75, -\row*0.75) {\pgfmathprintnumber[precision=0]{\val}};
+  }
+}
+\node[above] at (1.5, 0.5) {\textbf{Input $f$}};
+
+% Structuring element 3x3
+\foreach \row in {0,...,2} {
+  \foreach \col in {0,...,2} {
+    \node[draw, minimum size=0.6cm, fill=orange!30, font=\tiny] at (5.5+\col*0.6, -\row*0.6) {1};
+  }
+}
+\node[above] at (6.1, 0.5) {\textbf{SE $B$ (3x3)}};
+
+% Output grid 5x5 (dilation)
+\def\outp{
+  {1,1,1,0,0},
+  {1,1,1,1,0},
+  {1,1,1,1,0},
+  {1,1,1,1,0},
+  {0,0,0,0,0}
+}
+\foreach \row in {0,...,4} {
+  \foreach \col in {0,...,4} {
+    \pgfmathsetmacro{\val}{\outp[\row][\col]}
+    \pgfmathsetmacro{\colr}{ifthenelse(\val>0.5,"green!40","white")}
+    \node[draw, minimum size=0.75cm, fill=\colr, font=\tiny] at (9+\col*0.75, -\row*0.75) {\pgfmathprintnumber[precision=0]{\val}};
+  }
+}
+\node[above] at (10.5, 0.5) {\textbf{Output $f \oplus B$}};
+
+% Arrow
+\draw[->, very thick] (3.9, -1.5) -- (8.8, -1.5) node[midway, above]{\small max-filter};
+\end{tikzpicture}
+\end{center}
+
+\subsection{Figure 2: Type Conversion Flow}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners, minimum width=2.8cm, minimum height=0.8cm,
+              text centered, font=\small},
+  arr/.style={->, thick}]
+
+\node[box, fill=red!20]    (bool)  at (0,0)    {\texttt{CV\_Bool} kernel};
+\node[box, fill=yellow!30] (conv)  at (4,0)    {\texttt{convertTo(CV\_8U)}};
+\node[box, fill=green!25]  (u8)    at (8,0)    {\texttt{CV\_8U} kernel};
+\node[box, fill=blue!20]   (dil)   at (8,-1.8) {\texttt{dilate()} OK};
+
+\draw[arr] (bool) -- (conv) node[midway,above]{\small fix: check depth};
+\draw[arr] (conv) -- (u8)   node[midway,above]{\small bool $\to$ uint8};
+\draw[arr] (u8)   -- (dil)  node[midway,right]{\small assertion passes};
+
+% Error path (original)
+\node[box, fill=red!40] (err) at (4,-1.8) {\texttt{CV\_Assert FAIL}};
+\draw[arr, red, dashed] (bool) -- (err) node[midway, below, sloped]{\small original (bug)};
+\end{tikzpicture}
+\end{center}
+
+%-----------------------------------------------------------------------
+\section{References}
+
+\begin{enumerate}
+  \item J.\ Serra.
+        \emph{Image Analysis and Mathematical Morphology}.
+        Academic Press, 1982.
+  \item R.\ M.\ Haralick, S.\ R.\ Sternberg, and X.\ Zhuang.
+        ``Image analysis using mathematical morphology.''
+        \emph{IEEE Transactions on Pattern Analysis and Machine Intelligence},
+        9(4):532--550, 1987.
+  \item OpenCV Documentation: \texttt{dilate()}.
+        \url{https://docs.opencv.org/4.x/d4/d86/group__imgproc__filter.html}
+  \item OpenCV \texttt{Mat} type constants reference.
+        \url{https://docs.opencv.org/4.x/d1/d1b/group__core__hal__interface.html}
+\end{enumerate}
+
+\end{document}
