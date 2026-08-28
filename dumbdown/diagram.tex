@@ -1,0 +1,101 @@
+\documentclass[tikz,border=12pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, shapes.geometric, positioning, fit, calc}
+
+\begin{document}
+\begin{tikzpicture}[
+    >=Stealth,
+    labelstyle/.style={font=\small\sffamily},
+    titlestyle/.style={font=\bfseries\sffamily},
+    cam/.style={isosceles triangle, draw, isosceles triangle apex angle=60,
+                fill=#1, rotate=0, minimum height=1cm, minimum width=0.5cm},
+    objbox/.style={draw, rectangle, fill=#1, minimum width=1.0cm,
+                   minimum height=1.2cm, rounded corners=2pt, line width=1.2pt},
+]
+
+%% ========== LEFT: WRONG solution ==========
+\begin{scope}[xshift=0cm]
+
+  % Title
+  \node[titlestyle, text=red!80] (title-bad) at (2.5, 2.8)
+      {WRONG: Object behind camera};
+  \node[labelstyle, text=red!60] at (2.5, 2.3)
+      {\texttt{det=+1} but $z < 0$ --- impossible};
+
+  % Camera (pointing right, apex on left)
+  \node[cam=yellow!30, draw=gray!70, rotate=90, shape border rotate=90]
+      (cam-bad) at (3.5, 1.0) {};
+  \node[below=0.15cm of cam-bad, labelstyle] {Camera};
+
+  % Camera z-axis arrow (pointing right)
+  \draw[->, thick, gray!60] (cam-bad.east) -- +(1.8, 0)
+      node[right, labelstyle, text=gray!70] {$+z$ axis};
+
+  % Object to the LEFT of camera (behind it)
+  \node[objbox=red!20, draw=red!70] (obj-bad) at (1.0, 1.0) {Object};
+
+  % Depth label
+  \draw[<->, dashed, red!70, thick]
+      (obj-bad.east) -- (cam-bad.west |- obj-bad.east)
+      node[midway, above, labelstyle, text=red!80] {$z = -2.5\,\text{m}$};
+
+  % Big red X
+  \node[text=red!80, font=\bfseries\Huge] at (2.5, -0.3) {\texttimes};
+
+  % Border box
+  \draw[red!50, dashed, rounded corners=6pt, line width=1pt]
+      (-0.2, -0.6) rectangle (5.2, 3.1);
+
+\end{scope}
+
+%% ========== Arrow in the middle ==========
+\draw[->, line width=2pt, blue!50] (5.5, 1.0) -- (6.8, 1.0)
+    node[midway, above, labelstyle, text=blue!70, align=center]
+        {depth\\check};
+
+%% ========== RIGHT: CORRECT solution ==========
+\begin{scope}[xshift=7.0cm]
+
+  % Title
+  \node[titlestyle, text=green!60!black] (title-good) at (2.5, 2.8)
+      {CORRECT: Object in front of camera};
+  \node[labelstyle, text=green!50!black] at (2.5, 2.3)
+      {$z > 0$ for all points --- physically valid};
+
+  % Camera (same position)
+  \node[cam=yellow!30, draw=gray!70, rotate=90, shape border rotate=90]
+      (cam-good) at (1.5, 1.0) {};
+  \node[below=0.15cm of cam-good, labelstyle] {Camera};
+
+  % Camera z-axis arrow (pointing right)
+  \draw[->, thick, gray!60] (cam-good.east) -- +(1.8, 0)
+      node[right, labelstyle, text=gray!70] {$+z$ axis};
+
+  % Object to the RIGHT of camera (in front)
+  \node[objbox=green!20, draw=green!60!black] (obj-good) at (4.0, 1.0) {Object};
+
+  % Depth label
+  \draw[<->, dashed, green!60!black, thick]
+      (cam-good.east |- obj-good) -- (obj-good.west)
+      node[midway, above, labelstyle, text=green!60!black] {$z = +2.5\,\text{m}$};
+
+  % Big green tick
+  \node[text=green!60!black, font=\bfseries\Huge] at (2.5, -0.3)
+      {\checkmark};
+
+  % Border box
+  \draw[green!60!black, dashed, rounded corners=6pt, line width=1pt]
+      (-0.2, -0.6) rectangle (5.2, 3.1);
+
+\end{scope}
+
+%% ========== Fix description at bottom ==========
+\node[draw=gray!40, fill=gray!8, rounded corners=4pt,
+      font=\ttfamily\footnotesize, align=left]
+    at (7.0, -1.4) {
+        \textbf{Fix logic:} if all projected points have $z < 0$: \\
+        \quad rvec $\leftarrow$ $-$rvec; \quad tvec $\leftarrow$ $-$tvec;
+    };
+
+\end{tikzpicture}
+\end{document}
