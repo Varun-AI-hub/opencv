@@ -1,0 +1,371 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+
+\geometry{margin=1in}
+
+\lstset{
+  language=C++,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{green!50!black},
+  stringstyle=\color{red!70!black},
+  frame=single,
+  breaklines=true,
+  numbers=left,
+  numberstyle=\tiny\color{gray}
+}
+
+\title{\textbf{Color Space Conversions for Edge Detection:\\Full Mathematical Exposition}\\
+\large RGB/BGR Ordering, Grayscale Luminance, WebAssembly Image Data, and Canny Edges}
+\author{OpenCV Project --- Algorithm Documentation}
+\date{2024}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{Luminance and Perceptual Colour Weighting}
+%----------------------------------------------------------------------
+
+\subsection{Human Visual System Sensitivity}
+
+The human eye contains three types of cone photoreceptors (L, M, S) with spectral
+sensitivities approximated by the CIE 1931 colour-matching functions.  The photopic
+luminosity function $V(\lambda)$ peaks at $\approx 555\,\text{nm}$ (green).
+
+The perceptual weighting coefficients for luma ($Y$) reflect the relative luminous
+efficiency at each primary's dominant wavelength:
+\begin{itemize}
+\item Green: $\approx 555\,\text{nm}$, near peak of $V(\lambda)$ — highest weight.
+\item Red: $\approx 620\,\text{nm}$, falling edge of $V(\lambda)$ — medium weight.
+\item Blue: $\approx 470\,\text{nm}$, far from peak — lowest weight.
+\end{itemize}
+
+\subsection{ITU-R BT.601 (Standard Definition)}
+
+The BT.601 luma formula for standard-definition video is:
+\begin{equation}
+Y_{\text{BT.601}} = 0.299\,R + 0.587\,G + 0.114\,B.
+\label{eq:bt601}
+\end{equation}
+The coefficients sum to unity: $0.299 + 0.587 + 0.114 = 1.000$.
+Green carries $58.7\%$ of the luminance, reflecting its proximity to $V(\lambda)$'s peak.
+
+\subsection{ITU-R BT.709 (High Definition)}
+
+For high-definition video (sRGB primaries):
+\begin{equation}
+Y_{\text{BT.709}} = 0.2126\,R + 0.7152\,G + 0.0722\,B.
+\label{eq:bt709}
+\end{equation}
+The higher green coefficient ($71.52\%$) vs BT.601 reflects the shifted chromaticity
+coordinates of HD primaries (sRGB/D65 white point).
+
+\subsection{Derivation from Chromaticity}
+
+Given primary chromaticities $(x_R, y_R)$, $(x_G, y_G)$, $(x_B, y_B)$ and white point
+$(x_W, y_W)$, the luma coefficients $(k_R, k_G, k_B)$ satisfy:
+\[
+\begin{pmatrix}X_W \\ Y_W \\ Z_W\end{pmatrix}
+= k_R\begin{pmatrix}X_R\\Y_R\\Z_R\end{pmatrix}
++ k_G\begin{pmatrix}X_G\\Y_G\\Z_G\end{pmatrix}
++ k_B\begin{pmatrix}X_B\\Y_B\\Z_B\end{pmatrix},
+\]
+where $X_i = x_i/y_i$, $Z_i = (1-x_i-y_i)/y_i$.  Solving for $k_R, k_G, k_B$ and
+normalising to $Y_W = 1$ gives the BT.709 coefficients in Eq.~\eqref{eq:bt709}.
+
+%----------------------------------------------------------------------
+\section{Channel Order Conventions}
+%----------------------------------------------------------------------
+
+\subsection{Memory Layout}
+
+For an $W \times H$ image with pixel values $(R_i, G_i, B_i)$ at pixel index $i$:
+
+\begin{description}
+\item[RGB layout] \mbox{}\\
+  Memory: $[R_0, G_0, B_0,\; R_1, G_1, B_1,\;\ldots]$\\
+  Byte offset of channel $c$ for pixel $i$: $\delta = 3i + c$, where $c \in \{0=R, 1=G, 2=B\}$.
+
+\item[BGR layout] \mbox{}\\
+  Memory: $[B_0, G_0, R_0,\; B_1, G_1, R_1,\;\ldots]$\\
+  Byte offset of channel $c$ for pixel $i$: $\delta = 3i + c$, where $c \in \{0=B, 1=G, 2=R\}$.
+\end{description}
+
+OpenCV historically adopted BGR because early frame-grabber hardware (Video4Linux, Matrox)
+delivered frames in BGR order; defaulting to BGR avoided a per-pixel channel swap.
+
+\subsection{RGBA in Browser: HTML Canvas Spec}
+
+The HTML5 Canvas 2D API mandates RGBA byte order (per W3C Canvas specification):
+\begin{itemize}
+\item \texttt{ImageData.data}: Uint8ClampedArray with layout $[R_0, G_0, B_0, A_0, R_1, \ldots]$.
+\item Alpha channel $A \in [0, 255]$, with $255 = $ fully opaque.
+\end{itemize}
+
+\subsection{The Channel-Swap Bug}
+
+Applying the BT.601 formula~\eqref{eq:bt601} to BGR-ordered data treats $B$ as $R$
+and $R$ as $B$:
+\begin{equation}
+Y_{\text{wrong}} = 0.299\,B + 0.587\,G + 0.114\,R.
+\label{eq:wrong}
+\end{equation}
+
+%----------------------------------------------------------------------
+\section{Error Analysis}
+%----------------------------------------------------------------------
+
+\subsection{Pure Red Pixel}
+
+Let $(R, G, B) = (255, 0, 0)$.  Then:
+\begin{align}
+Y_{\text{correct}} &= 0.299 \times 255 + 0 + 0 = 76.2,\label{eq:red_correct}\\
+Y_{\text{wrong}}   &= 0 + 0 + 0.114 \times 255 = 29.1.\label{eq:red_wrong}
+\end{align}
+Error: $|76.2 - 29.1| = 47.1$ (out of 255), a relative error of $\approx 61.8\%$, or
+equivalently $Y_{\text{correct}} / Y_{\text{wrong}} \approx 2.62\times$.
+
+\subsection{Skin Tone Example}
+
+A typical skin tone $(R, G, B) = (210, 180, 140)$:
+\begin{align}
+Y_{\text{correct}} &= 0.299\times210 + 0.587\times180 + 0.114\times140
+                    = 62.79 + 105.66 + 15.96 = 184.4,\\
+Y_{\text{wrong}}   &= 0.299\times140 + 0.587\times180 + 0.114\times210
+                    = 41.86 + 105.66 + 23.94 = 171.5,\\
+|Y_{\text{correct}} - Y_{\text{wrong}}| &= 12.9 \approx 13 \text{ out of 255}.
+\end{align}
+
+\begin{remark}
+The error magnitude depends on $|R - B|$: it is exactly
+$(0.299 - 0.114)|R - B| = 0.185|R - B|$.  For skin tones with $R-B \approx 70$,
+this gives $\approx 13$ gray levels.  For red objects, $R - B$ can be 255,
+yielding $0.185 \times 255 \approx 47$ gray levels.
+\end{remark}
+
+\subsection{General Error Formula}
+
+For any pixel $(R, G, B)$, the luminance error due to channel swap is:
+\begin{equation}
+\Delta Y = Y_{\text{correct}} - Y_{\text{wrong}}
+         = (0.299 - 0.114)(R - B)
+         = 0.185\,(R - B).
+\label{eq:error}
+\end{equation}
+
+%----------------------------------------------------------------------
+\section{Edge Detection Mathematics}
+%----------------------------------------------------------------------
+
+\subsection{Canny Edge Detector Pipeline}
+
+The Canny detector \cite{canny1986} proceeds in five stages:
+
+\begin{enumerate}
+\item \textbf{Gaussian blur}: convolve $I$ with $G_\sigma$ to suppress noise.
+\[
+I_s = I * G_\sigma,
+\quad
+G_\sigma(x,y) = \frac{1}{2\pi\sigma^2}\exp\!\left(-\frac{x^2+y^2}{2\sigma^2}\right).
+\]
+
+\item \textbf{Sobel gradient}: approximate spatial derivatives.
+
+\item \textbf{Gradient magnitude and direction}.
+
+\item \textbf{Non-maximum suppression (NMS)}: thin edges to 1 pixel.
+
+\item \textbf{Hysteresis thresholding}: retain edges with $|\nabla I| \geq t_{\text{high}}$
+and their $|\nabla I| \geq t_{\text{low}}$ neighbours.
+\end{enumerate}
+
+\subsection{Sobel Operators}
+
+The discrete gradient is approximated by the Sobel kernels:
+\begin{equation}
+G_x =
+\begin{pmatrix}
+-1 & 0 & 1 \\
+-2 & 0 & 2 \\
+-1 & 0 & 1
+\end{pmatrix},
+\qquad
+G_y = G_x^T =
+\begin{pmatrix}
+-1 & -2 & -1 \\
+ 0 &  0 &  0 \\
+ 1 &  2 &  1
+\end{pmatrix}.
+\label{eq:sobel}
+\end{equation}
+These are separable: $G_x = \begin{pmatrix}1\\2\\1\end{pmatrix}\begin{pmatrix}-1&0&1\end{pmatrix}$,
+enabling efficient $O(n)$ convolution per row/column.
+
+\subsection{Gradient Magnitude and Direction}
+
+\begin{equation}
+|\nabla I| = \sqrt{(I_s * G_x)^2 + (I_s * G_y)^2},
+\label{eq:magnitude}
+\end{equation}
+\begin{equation}
+\angle\nabla I = \text{atan2}(I_s * G_y,\; I_s * G_x).
+\label{eq:direction}
+\end{equation}
+
+\subsection{Impact of Wrong Grayscale on Edge Detection}
+
+From Eq.~\eqref{eq:error}, a luminance error of $\Delta Y = 0.185(R-B)$ propagates
+into gradient errors.  Near a red--blue boundary the intensity step is:
+\begin{align}
+\text{True gradient} &: |\nabla Y_{\text{correct}}| \approx \frac{\Delta Y_{\text{correct}}}{\Delta x},\\
+\text{Wrong gradient} &: |\nabla Y_{\text{wrong}}| \approx \frac{\Delta Y_{\text{wrong}}}{\Delta x}.
+\end{align}
+A pure red blob on a blue background causes the wrong conversion to underestimate
+the step by $\approx 47$ gray levels per pixel, potentially falling below
+$t_{\text{low}}$ and causing missed edges.
+
+%----------------------------------------------------------------------
+\section{WebAssembly / OpenCV.js Integration}
+%----------------------------------------------------------------------
+
+The browser workflow for edge detection:
+\begin{enumerate}
+\item HTML Canvas $\to$ \texttt{ctx.getImageData()} $\to$ \texttt{ImageData.data}
+      (RGBA, Uint8ClampedArray).
+\item \texttt{cv.matFromImageData(imgData)} creates a 4-channel \texttt{cv::Mat} (RGBA).
+\item \texttt{cv.cvtColor(src, dst, cv.COLOR\_RGBA2GRAY)} applies:
+\[
+Y = 0.299\,R + 0.587\,G + 0.114\,B
+\]
+to the correctly-identified R, G, B channels (ignoring A).
+\item \texttt{cv.Canny(dst, edges, t\_low, t\_high)} runs the 5-stage pipeline.
+\end{enumerate}
+
+\begin{remark}
+\texttt{cv.COLOR\_BGRA2GRAY} would also be wrong here because \texttt{ImageData}
+is RGBA, not BGRA.  The correct conversion code is \texttt{cv.COLOR\_RGBA2GRAY}.
+\end{remark}
+
+%----------------------------------------------------------------------
+\section{TikZ Figures}
+%----------------------------------------------------------------------
+
+\subsection{Figure 1: Pixel Memory Layout (RGBA vs BGRA)}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  cell/.style={draw, minimum width=0.9cm, minimum height=0.7cm,
+               font=\scriptsize, text centered}
+]
+% RGBA layout
+\node[font=\small\bfseries] at (2.7, 1.5) {RGBA (Canvas / HTML spec)};
+\foreach \i/\c/\col in {
+  0/R/red!40, 1/G/green!40, 2/B/blue!30, 3/A/gray!30,
+  4/R/red!40, 5/G/green!40, 6/B/blue!30, 7/A/gray!30}
+  \node[cell, fill=\col] at (\i*0.9 + 0.45, 0.9) {\c};
+\node[font=\tiny] at (7*0.9 + 1.2, 0.9) {$\cdots$};
+
+% BGRA layout
+\node[font=\small\bfseries] at (2.7, -0.2) {BGRA (OpenCV internal convention)};
+\foreach \i/\c/\col in {
+  0/B/blue!30, 1/G/green!40, 2/R/red!40, 3/A/gray!30,
+  4/B/blue!30, 5/G/green!40, 6/R/red!40, 7/A/gray!30}
+  \node[cell, fill=\col] at (\i*0.9 + 0.45, -0.9) {\c};
+\node[font=\tiny] at (7*0.9 + 1.2, -0.9) {$\cdots$};
+
+% Byte index labels
+\foreach \i in {0,...,7}
+  \node[font=\tiny, gray] at (\i*0.9 + 0.45, -1.5) {\i};
+
+% Arrow showing R and B swap
+\draw[-{Stealth}, red!70, thick] (0.45, 0.55) -- (0.45+1.8, -0.55)
+    node[midway, left, font=\tiny, red]{swap};
+\draw[-{Stealth}, blue!70, thick] (0.45+1.8, 0.55) -- (0.45, -0.55);
+\end{tikzpicture}
+\caption{Memory layout of a pixel sequence in RGBA (top) vs.\ BGRA (bottom).
+Canvas \texttt{ImageData} always uses RGBA; applying BGR-assuming code swaps the
+R and B channels, causing error $\Delta Y = 0.185(R-B)$ per Eq.~\eqref{eq:error}.}
+\label{fig:layout}
+\end{figure}
+
+\subsection{Figure 2: Canny Edge Detection Pipeline}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  node distance=0.4cm and 0.1cm,
+  box/.style={rectangle, draw, rounded corners, minimum width=2.0cm,
+              minimum height=0.7cm, fill=blue!10, font=\small, text centered},
+  arrow/.style={-{Stealth}, thick}
+]
+\node[box] (in)     {Input $I$};
+\node[box, right=1.0cm of in]   (gauss)  {Gaussian\\ Blur $G_\sigma$};
+\node[box, right=1.0cm of gauss](sobel)  {Sobel\\ Gradient};
+\node[box, right=1.0cm of sobel](nms)    {Non-max\\ Suppression};
+\node[box, right=1.0cm of nms]  (hyst)   {Hysteresis\\ Threshold};
+\node[box, right=1.0cm of hyst] (out)    {Edge Map};
+
+\foreach \a/\b in {in/gauss, gauss/sobel, sobel/nms, nms/hyst, hyst/out}
+  \draw[arrow] (\a) -- (\b);
+
+% Labels below arrows
+\node[font=\tiny, below=0.1cm of gauss] {$I_s = I*G_\sigma$};
+\node[font=\tiny, below=0.1cm of sobel] {$|\nabla I|$, $\angle\nabla I$};
+\node[font=\tiny, below=0.1cm of nms]   {1-px edges};
+\node[font=\tiny, below=0.1cm of hyst]  {$t_\text{lo},\,t_\text{hi}$};
+\end{tikzpicture}
+\caption{Canny edge detection pipeline (Eqs.~\ref{eq:sobel}--\ref{eq:direction}).
+An incorrect grayscale conversion (wrong channel order) corrupts $I_s$ and thereby
+all downstream gradient magnitudes, leading to missed or spurious edges.}
+\label{fig:canny}
+\end{figure}
+
+%----------------------------------------------------------------------
+\section*{References}
+%----------------------------------------------------------------------
+\begin{thebibliography}{9}
+
+\bibitem{bt601}
+ITU-R, \textit{Recommendation BT.601-7: Studio Encoding Parameters of Digital Television
+for Standard 4:3 and Wide-screen 16:9 Aspect Ratios}, 2011.
+
+\bibitem{bt709}
+ITU-R, \textit{Recommendation BT.709-6: Parameter Values for the HDTV Standards
+for Production and International Programme Exchange}, 2015.
+
+\bibitem{canvas}
+W3C, \textit{HTML Canvas 2D Context --- ImageData},
+\url{https://html.spec.whatwg.org/multipage/canvas.html#imagedata}, 2024.
+
+\bibitem{canny1986}
+J.~Canny,
+``A Computational Approach to Edge Detection,''
+\textit{IEEE Trans.\ Pattern Anal.\ Mach.\ Intell.},
+vol.~PAMI-8, no.~6, pp.~679--698, Nov.\ 1986.
+
+\bibitem{opencv_color}
+OpenCV Documentation, \textit{Color Space Conversions},
+\url{https://docs.opencv.org/4.x/d8/d01/group__imgproc__color__conversions.html}, 2024.
+
+\end{thebibliography}
+
+\end{document}
