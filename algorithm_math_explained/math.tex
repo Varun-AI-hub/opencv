@@ -1,0 +1,347 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+\pgfplotsset{compat=1.18}
+\geometry{margin=1in}
+
+\title{\textbf{DNN Layer Fusion Optimization}\\
+\large When Fusion is Safe and the pinsToKeep Guard\\
+\normalsize OpenCV Fix: Issue 17944 --- DNN Fusion Output Corruption}
+\author{OpenCV DNN Module}
+\date{\today}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+\newtheorem{lemma}{Lemma}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+Layer fusion is a compiler-level optimization for neural network inference engines. When consecutive layers can be fused into a single kernel, intermediate activation tensors can be eliminated, reducing memory bandwidth and improving cache utilization. However, fusion is unsafe when intermediate tensors are requested as outputs by the user. OpenCV's DNN module had a bug where fusion proceeded even for \emph{pinned} output tensors, destroying requested intermediate outputs. This document provides a complete mathematical treatment of the computation graph, fusion conditions, safety invariants, and the fix.
+
+\section{Neural Network Computation Graph}
+
+\subsection{DAG Structure}
+
+A neural network is modeled as a Directed Acyclic Graph (DAG):
+\begin{equation}
+G = (V, E, \lambda, \tau)
+\end{equation}
+
+where:
+\begin{itemize}
+  \item $V$ = set of layer nodes (e.g., Conv, BatchNorm, ReLU, Add)
+  \item $E \subseteq V \times V$ = directed edges representing tensor data flow
+  \item $\lambda : V \to \mathcal{L}$ = label function mapping nodes to layer types
+  \item $\tau : E \to \mathcal{D}$ = type function mapping edges to tensor data types
+\end{itemize}
+
+\begin{definition}[In-degree and Out-degree]
+For layer $v \in V$:
+\begin{align}
+\text{in-degree}(v) &= |\{u : (u,v) \in E\}| \\
+\text{out-degree}(v) &= |\{w : (v,w) \in E\}|
+\end{align}
+\end{definition}
+
+\subsection{Tensor Materialization}
+
+For each edge $e = (u, v) \in E$, an activation tensor $A_e \in \mathbb{R}^{d_1 \times \cdots \times d_n}$ is computed by layer $u$ and consumed by layer $v$. The memory cost is:
+\begin{equation}
+\text{mem}(e) = \prod_{k=1}^{n} d_k(e) \times \text{sizeof}(\tau(e)) \text{ bytes}
+\end{equation}
+
+Total memory for all intermediate tensors:
+\begin{equation}
+M_{\text{total}} = \sum_{e \in E} \text{mem}(e)
+\end{equation}
+
+\section{Layer Fusion}
+
+\subsection{Fuseable Layer Sequences}
+
+A sequence of layers $L_1 \to L_2 \to \cdots \to L_K$ is \emph{fuseable} if:
+\begin{enumerate}
+  \item Each intermediate layer $L_i$ ($1 \leq i < K$) has exactly one consumer: $\text{out-degree}(L_i) = 1$
+  \item The layer types support fusion: $\lambda(L_1, \ldots, L_K) \in \mathcal{F}$ where $\mathcal{F}$ is the set of fuseable patterns
+  \item No intermediate tensor is a pinned output: $\forall i \in \{1, \ldots, K-1\} : (L_i \to L_{i+1}) \notin \text{pinsToKeep}$
+\end{enumerate}
+
+\begin{definition}[pinsToKeep]
+The set $\text{pinsToKeep} \subseteq E$ consists of edges whose corresponding tensors must be materialized and returned to the caller:
+\begin{equation}
+\text{pinsToKeep} = \{e \in E : \text{user requests tensor } A_e \text{ as output}\}
+\end{equation}
+\end{definition}
+
+\subsection{Common Fusion Patterns}
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Pattern} & \textbf{Example} \\
+\hline
+Conv + BatchNorm & Absorb BN scale/bias into conv weights \\
+Conv + ReLU & Apply ReLU directly after conv in-place \\
+Conv + BN + ReLU & Combined (most common) \\
+Conv + Bias & Absorb additive bias into conv \\
+MatMul + Add & Fused linear layer \\
+\hline
+\end{tabular}
+\caption{Common layer fusion patterns in neural network compilers.}
+\end{table}
+
+\subsection{Fusion Benefit: Memory Bandwidth Reduction}
+
+Without fusion of chain $L_1 \to L_2 \to L_3$, intermediate tensors $A_{1\to2}$ and $A_{2\to3}$ must be:
+\begin{itemize}
+  \item Written to DRAM after $L_1$ computation
+  \item Read from DRAM before $L_2$ computation
+  \item Written to DRAM after $L_2$ computation
+  \item Read from DRAM before $L_3$ computation
+\end{itemize}
+
+With fusion, only the final output $A_{3\to\cdots}$ is written to DRAM. Bandwidth saving:
+\begin{equation}
+\Delta_{\text{BW}} = 2 \times (\text{mem}(A_{1\to2}) + \text{mem}(A_{2\to3}))
+\end{equation}
+
+For a Conv+BN+ReLU block with $C$ channels and $H \times W$ spatial dimensions, each at float32:
+\begin{equation}
+\Delta_{\text{BW}} = 2 \times 2 \times C \times H \times W \times 4 \text{ bytes} = 16 CHW \text{ bytes}
+\end{equation}
+
+\section{Correctness Conditions for Fusion}
+
+\subsection{Graph Semantics}
+
+The semantics of a computation graph is a function $\llbracket G \rrbracket : \mathcal{I} \to \mathcal{O}$ from input tensors to output tensors. Fusion must preserve graph semantics:
+
+\begin{definition}[Fusion Correctness]
+A fusion transformation $G \to G'$ is \emph{correct} if:
+\begin{equation}
+\forall \mathbf{x} \in \mathcal{I} : \llbracket G \rrbracket(\mathbf{x}) = \llbracket G' \rrbracket(\mathbf{x})
+\end{equation}
+\end{definition}
+
+\subsection{Safety Invariant}
+
+\begin{theorem}[Fusion Safety]
+A fusion of edges $e_1 = (L_1, L_2)$ and $e_2 = (L_2, L_3)$ is correct if and only if:
+\begin{enumerate}
+  \item $\text{out-degree}(L_1) = 1$ (no other layer reads $A_{e_1}$)
+  \item $\text{out-degree}(L_2) = 1$ (no other layer reads $A_{e_2}$)
+  \item $e_1 \notin \text{pinsToKeep}$ (tensor $A_{e_1}$ is not a requested output)
+  \item $e_2 \notin \text{pinsToKeep}$ (tensor $A_{e_2}$ is not a requested output)
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+Conditions 1--2 ensure that fusing $L_1+L_2+L_3$ does not break data dependencies for other layers. Conditions 3--4 ensure that the user-requested outputs $A_{e_1}$ and $A_{e_2}$ are still materialized. Without condition 3, fusing $L_1+L_2$ eliminates $A_{e_1}$ from memory, so the user's output request cannot be satisfied.
+\end{proof}
+
+\section{The Bug and Fix}
+
+\subsection{Bug Description}
+
+The original fusion pass in \texttt{net\_impl\_fuse.cpp}:
+
+\begin{verbatim}
+for (auto& nextData : layer->consumers) {
+    LayerPin lpNext = nextData.pin;
+    if (canFuse(layer, nextLayer)) {
+        // BUG: fuses even if lpNext in pinsToKeep!
+        fuseLayers(layer, nextLayer);
+    }
+}
+\end{verbatim}
+
+The condition $\texttt{canFuse}(L_1, L_2)$ checks only structural feasibility (layer types, out-degree) but does NOT check whether the intermediate tensor $A_{L_1 \to L_2}$ is a pinned output.
+
+\subsection{Mathematical Description of the Bug}
+
+Let $\text{pinsToKeep} = \{e_p\}$ where $e_p = (L_1, L_2)$. The user requests $A_{e_p}$ as output.
+
+Before fusion:
+\begin{equation}
+\llbracket G \rrbracket(\mathbf{x}) = (A_{e_p}, A_{\text{final}}) \quad \text{(both returned)}
+\end{equation}
+
+After buggy fusion (fuses $L_1+L_2$, eliminating $A_{e_p}$):
+\begin{equation}
+\llbracket G' \rrbracket(\mathbf{x}) = (\textcolor{red}{\text{garbage}}, A_{\text{final}}) \quad \text{(} A_{e_p} \text{ not computed!)}
+\end{equation}
+
+This is a correctness violation: $\llbracket G \rrbracket \neq \llbracket G' \rrbracket$.
+
+\subsection{The Fix}
+
+\begin{verbatim}
+for (auto& nextData : layer->consumers) {
+    LayerPin lpNext = nextData.pin;
+    if (canFuse(layer, nextLayer) &&
+        pinsToKeep.count(lpNext) == 0) {  // FIX: guard!
+        fuseLayers(layer, nextLayer);
+    }
+}
+\end{verbatim}
+
+With the guard, fusion is skipped whenever the intermediate tensor is pinned. The corrected semantics:
+\begin{equation}
+\forall e \in \text{pinsToKeep}: e \text{ is NOT fused} \Rightarrow A_e \text{ is materialized} \Rightarrow \llbracket G' \rrbracket = \llbracket G \rrbracket \quad \checkmark
+\end{equation}
+
+\section{Complexity Analysis}
+
+\subsection{Without Fusion}
+
+Total inference time:
+\begin{equation}
+T_{\text{unfused}} = \sum_{v \in V} t_v
+\end{equation}
+
+where $t_v$ is the execution time of layer $v$.
+
+\subsection{With Fusion}
+
+Partition $V$ into fused chains $\mathcal{C}_1, \mathcal{C}_2, \ldots, \mathcal{C}_m$ and unfused layers:
+\begin{equation}
+T_{\text{fused}} = \sum_{j=1}^{m} t_{\mathcal{C}_j} + \sum_{v \notin \text{chains}} t_v
+\end{equation}
+
+where $t_{\mathcal{C}_j} < \sum_{v \in \mathcal{C}_j} t_v$ due to:
+\begin{itemize}
+  \item Reduced memory bandwidth: $\Delta_{\text{BW}} = 2 \times \sum_{e \in \text{chain interior}} \text{mem}(e)$
+  \item Improved cache locality: intermediate tensors fit in L1/L2 cache
+  \item Kernel launch overhead elimination: one GPU launch instead of $|\mathcal{C}_j|$
+\end{itemize}
+
+\subsection{Memory Reduction}
+
+Intermediate tensors eliminated by fusion:
+\begin{equation}
+\Delta M = \sum_{\text{fused chains}} \sum_{e \in \text{chain interior}} \text{mem}(e)
+\end{equation}
+
+For a typical ResNet-50 chain Conv(64,3,3)+BN+ReLU with $H=W=112$:
+\begin{equation}
+\Delta M = 2 \times 64 \times 112 \times 112 \times 4 = 6.4 \text{ MB saved per block}
+\end{equation}
+
+\section{TikZ Figure: Fusion with Side-Tap}
+
+Figure~\ref{fig:fusion} shows the computation graph before and after the fix.
+
+\begin{figure}[h!]
+\centering
+\begin{tikzpicture}[
+    node distance=1.5cm and 3.5cm,
+    layer/.style={draw, rectangle, rounded corners, fill=blue!15, minimum width=2cm, minimum height=0.8cm, font=\small\bfseries, text centered},
+    tensor/.style={draw, ellipse, fill=gray!15, minimum width=1.5cm, minimum height=0.6cm, font=\footnotesize, text centered},
+    pinned/.style={draw, ellipse, fill=yellow!40, minimum width=1.5cm, minimum height=0.6cm, font=\footnotesize, text centered},
+    output/.style={draw, ellipse, fill=green!20, minimum width=1.5cm, minimum height=0.6cm, font=\footnotesize, text centered},
+    bad/.style={draw, rectangle, fill=red!20, font=\footnotesize, text centered, minimum width=2cm, minimum height=0.6cm},
+    >=Stealth
+]
+
+%--- BEFORE fix (left side) ---
+\node[font=\small\bfseries] at (-1.5, 5.5) {BEFORE fix (bug):};
+
+\node[layer] (conv1) at (0, 5) {Conv};
+\node[tensor] (t1) at (0, 3.8) {$A_{\text{Conv}\to\text{BN}}$};
+\node[layer] (bn1) at (0, 2.8) {BatchNorm};
+\node[pinned] (t2) at (0, 1.6) {\textbf{$A_{\text{BN}\to\text{ReLU}}$}\\(pinned!)};
+\node[layer] (relu1) at (0, 0.6) {ReLU};
+\node[output] (out1) at (0, -0.5) {final output};
+
+\node[layer] (other1) at (2.8, 1.6) {OtherLayer};
+\node[bad] (gone) at (2.8, 0.2) {\textcolor{red}{$A_{\text{BN}}$ gone!\\output = garbage}};
+
+\draw[->] (conv1) -- (t1);
+\draw[->] (t1) -- (bn1);
+\draw[->] (bn1) -- (t2);
+\draw[->, red, dashed, line width=1.5pt] (t2) -- (other1) node[midway, above, font=\footnotesize, red] {needed!};
+\draw[->] (t2) -- (relu1);
+\draw[->] (relu1) -- (out1);
+\draw[->, red, dashed] (other1) -- (gone);
+
+\node[red, font=\Large\bfseries] at (1.5, 2.2) {$\times$ FUSED (bug)};
+
+%--- AFTER fix (right side) ---
+\node[font=\small\bfseries] at (7.5, 5.5) {AFTER fix (correct):};
+
+\node[layer] (conv2) at (6, 5) {Conv};
+\node[tensor] (t3) at (6, 3.8) {$A_{\text{Conv}\to\text{BN}}$};
+\node[layer] (bn2) at (6, 2.8) {BatchNorm};
+\node[pinned] (t4) at (6, 1.6) {\textbf{$A_{\text{BN}\to\text{ReLU}}$}\\(pinned!)};
+\node[layer] (relu2) at (6, 0.6) {ReLU};
+\node[output] (out2) at (6, -0.5) {final output};
+
+\node[layer] (other2) at (8.8, 1.6) {OtherLayer};
+\node[output] (good) at (8.8, 0.2) {\textcolor{green!60!black}{$A_{\text{BN}}$ preserved}};
+
+\draw[->] (conv2) -- (t3);
+\draw[->] (t3) -- (bn2);
+\draw[->] (bn2) -- (t4);
+\draw[->, green!60!black, line width=1.5pt] (t4) -- (other2) node[midway, above, font=\footnotesize, green!60!black] {preserved!};
+\draw[->] (t4) -- (relu2);
+\draw[->] (relu2) -- (out2);
+\draw[->, green!60!black] (other2) -- (good);
+
+\node[draw, fill=green!10, font=\footnotesize, rounded corners] at (7.2, 3.2) {fusion guarded:\\pinsToKeep.count $= 0$ check};
+
+\end{tikzpicture}
+\caption{Computation graph with side-tap. \textbf{Left (bug):} Conv+BN are fused, eliminating $A_{\text{BN}}$ from memory. OtherLayer that reads $A_{\text{BN}}$ receives garbage. \textbf{Right (fix):} Fusion is guarded by the \texttt{pinsToKeep} check; $A_{\text{BN}}$ is preserved and OtherLayer receives the correct value.}
+\label{fig:fusion}
+\end{figure}
+
+\section{BatchNorm Fusion: Mathematical Detail}
+
+\subsection{Fusing Conv + BatchNorm}
+
+A Convolutional layer with weights $\mathbf{W}$ and bias $\mathbf{b}$ computes:
+\begin{equation}
+y_c = \mathbf{W}_c * x + b_c
+\end{equation}
+
+BatchNorm normalizes using running statistics $\mu_c, \sigma_c^2$ and learned parameters $\gamma_c, \beta_c$:
+\begin{equation}
+z_c = \gamma_c \frac{y_c - \mu_c}{\sqrt{\sigma_c^2 + \epsilon}} + \beta_c
+\end{equation}
+
+Substituting $y_c = \mathbf{W}_c * x + b_c$:
+\begin{equation}
+z_c = \underbrace{\frac{\gamma_c}{\sqrt{\sigma_c^2 + \epsilon}} \mathbf{W}_c}_{\mathbf{W}'_c} * x + \underbrace{\frac{\gamma_c (b_c - \mu_c)}{\sqrt{\sigma_c^2 + \epsilon}} + \beta_c}_{b'_c}
+\end{equation}
+
+The fused Conv layer has parameters:
+\begin{align}
+\mathbf{W}'_c &= \frac{\gamma_c}{\sqrt{\sigma_c^2 + \epsilon}} \mathbf{W}_c \\
+b'_c &= \frac{\gamma_c (b_c - \mu_c)}{\sqrt{\sigma_c^2 + \epsilon}} + \beta_c
+\end{align}
+
+This requires \emph{no runtime computation} for BatchNorm --- it is absorbed into the conv weights at network initialization time, saving $O(C \times H \times W)$ multiply-add operations per inference.
+
+\section{References}
+
+\begin{enumerate}
+  \item Vasilache, N., et al. \textit{Tensor Comprehensions: Framework-Agnostic High-Performance Machine Learning Abstractions}. arXiv:1802.04730, 2018.
+  \item Chen, T., et al. \textit{TVM: An Automated End-to-End Optimizing Compiler for Deep Learning}. OSDI, 2018.
+  \item XLA Team. \textit{XLA: Optimizing Compiler for Machine Learning}. Google Brain, 2017.
+  \item Ioffe, S., Szegedy, C. \textit{Batch Normalization: Accelerating Deep Network Training}. ICML, 2015.
+  \item OpenCV DNN Module. \textit{net\_impl\_fuse.cpp}. OpenCV repository.
+\end{enumerate}
+
+\end{document}
