@@ -1,0 +1,45 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+
+\begin{document}
+\begin{tikzpicture}[
+  node distance=1.4cm and 1.8cm,
+  box/.style={rectangle, rounded corners=4pt, minimum width=2.8cm, minimum height=1cm,
+              text centered, draw=black, font=\small},
+  arrow/.style={-Stealth, thick},
+  label/.style={font=\footnotesize\itshape}
+]
+
+%% --- Nodes ---
+\node[box, fill=blue!15] (input) {Input Tensor\\(float)};
+\node[box, fill=orange!20, right=of input] (gt)   {Greater Than\\operator};
+\node[box, fill=red!40,    right=of gt]    (bool) {BOOL Tensor\\(true/false)};
+\node[box, fill=green!25,  right=of bool]  (where){Where op};
+\node[box, fill=blue!15,   right=of where] (out)  {Output Tensor\\(float)};
+
+%% --- Main arrows ---
+\draw[arrow] (input) -- (gt);
+\draw[arrow] (gt)    -- (bool);
+\draw[arrow] (bool)  -- (where);
+\draw[arrow] (where) -- (out);
+
+%% --- BEFORE label (crash) ---
+\node[above=0.5cm of bool, font=\small\bfseries, text=red] (before) {BEFORE: CRASH};
+\draw[-Stealth, red, thick, dashed] (bool.north) -- (before.south);
+
+%% --- AFTER label (fixed) ---
+\node[below=0.5cm of bool, font=\small\bfseries, text=green!60!black] (after) {AFTER: CV\_8U};
+\draw[-Stealth, green!60!black, thick] (bool.south) -- (after.north);
+
+%% --- Data type labels on arrows ---
+\node[label, above=0.15cm] at ($(input)!0.5!(gt)$)   {float32};
+\node[label, above=0.15cm] at ($(gt)!0.5!(bool)$)    {bool};
+\node[label, above=0.15cm] at ($(bool)!0.5!(where)$) {bool};
+\node[label, above=0.15cm] at ($(where)!0.5!(out)$)  {float32};
+
+%% --- Title ---
+\node[font=\large\bfseries, above=1.4cm of gt] {ONNX Bool Tensor Pipeline --- Fix \#19366};
+
+\end{tikzpicture}
+\end{document}
