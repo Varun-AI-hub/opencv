@@ -1,0 +1,322 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+\pgfplotsset{compat=1.18}
+\geometry{margin=1in}
+
+\title{\textbf{Visual Odometry: RGB, Depth, and RGB-D Modes}\\
+\large Camera Motion Estimation from Sequential Frames\\
+\normalsize OpenCV Fix: Issue 23103 --- Odometry RGB Mode Assertion}
+\author{OpenCV 3D/ptcloud Module}
+\date{\today}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+\newtheorem{lemma}{Lemma}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+Visual odometry (VO) estimates the motion of a camera by analyzing sequential frames. OpenCV's odometry module supports three modes: RGB (intensity-based), DEPTH (geometry-based), and RGB-D (joint). A bug caused RGB mode to require a depth map via an unconditional assertion, crashing when no depth was provided. This document provides a complete mathematical treatment of all three modes and the fix.
+
+\section{Lie Group: Rigid Body Motion}
+
+\subsection{Special Euclidean Group SE(3)}
+
+Camera pose is represented as an element of the Special Euclidean group in 3D:
+\begin{equation}
+SE(3) = \left\{ \mathbf{T} = \begin{pmatrix} \mathbf{R} & \mathbf{t} \\ \mathbf{0}^T & 1 \end{pmatrix} : \mathbf{R} \in SO(3),\; \mathbf{t} \in \mathbb{R}^3 \right\}
+\end{equation}
+
+where $SO(3) = \{\mathbf{R} \in \mathbb{R}^{3\times3} : \mathbf{R}^T\mathbf{R} = \mathbf{I},\; \det(\mathbf{R}) = 1\}$ is the special orthogonal group.
+
+The group operation (composition of transformations) is:
+\begin{equation}
+\mathbf{T}_1 \cdot \mathbf{T}_2 = \begin{pmatrix} \mathbf{R}_1\mathbf{R}_2 & \mathbf{R}_1\mathbf{t}_2 + \mathbf{t}_1 \\ \mathbf{0}^T & 1 \end{pmatrix}
+\end{equation}
+
+\subsection{Relative Motion}
+
+Given camera poses $\mathbf{T}_k$ and $\mathbf{T}_{k+1}$ at frames $k$ and $k+1$, the relative motion is:
+\begin{equation}
+\Delta\mathbf{T}_k = \mathbf{T}_{k+1} \mathbf{T}_k^{-1}
+\end{equation}
+
+where the inverse is:
+\begin{equation}
+\mathbf{T}^{-1} = \begin{pmatrix} \mathbf{R}^T & -\mathbf{R}^T\mathbf{t} \\ \mathbf{0}^T & 1 \end{pmatrix}
+\end{equation}
+
+\subsection{Lie Algebra se(3)}
+
+The Lie algebra $\mathfrak{se}(3)$ is the tangent space at the identity. Elements are $6$-vectors $\boldsymbol{\xi} = (\boldsymbol{\omega}, \mathbf{v}) \in \mathbb{R}^6$ with hat operator:
+
+\begin{equation}
+\hat{\boldsymbol{\xi}} = \begin{pmatrix} [\boldsymbol{\omega}]_\times & \mathbf{v} \\ \mathbf{0}^T & 0 \end{pmatrix} \in \mathbb{R}^{4\times4}
+\end{equation}
+
+where $[\boldsymbol{\omega}]_\times$ is the skew-symmetric matrix of $\boldsymbol{\omega} = (\omega_1, \omega_2, \omega_3)$:
+\begin{equation}
+[\boldsymbol{\omega}]_\times = \begin{pmatrix} 0 & -\omega_3 & \omega_2 \\ \omega_3 & 0 & -\omega_1 \\ -\omega_2 & \omega_1 & 0 \end{pmatrix}
+\end{equation}
+
+The exponential map $\exp: \mathfrak{se}(3) \to SE(3)$ converts a twist to a transformation matrix.
+
+\section{Camera Projection Model}
+
+\subsection{Pinhole Camera}
+
+The projection function $\pi: \mathbb{R}^3 \to \mathbb{R}^2$ for a pinhole camera with focal lengths $f_x, f_y$ and principal point $(c_x, c_y)$:
+\begin{equation}
+\pi\begin{pmatrix} X \\ Y \\ Z \end{pmatrix} = \begin{pmatrix} f_x X / Z + c_x \\ f_y Y / Z + c_y \end{pmatrix}
+\end{equation}
+
+The intrinsic matrix $\mathbf{K}$ is:
+\begin{equation}
+\mathbf{K} = \begin{pmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{pmatrix}
+\end{equation}
+
+\subsection{Back-Projection}
+
+Given a pixel $\mathbf{x} = (u, v)$ and depth $Z$, the 3D point is:
+\begin{equation}
+\mathbf{X} = Z \mathbf{K}^{-1} \begin{pmatrix} u \\ v \\ 1 \end{pmatrix} = \begin{pmatrix} Z(u - c_x)/f_x \\ Z(v - c_y)/f_y \\ Z \end{pmatrix}
+\end{equation}
+
+\section{RGB Odometry (Intensity-Based)}
+
+\subsection{Photometric Consistency}
+
+The core assumption of RGB odometry is brightness constancy:
+\begin{equation}
+I_{k+1}(\pi(\Delta\mathbf{T} \cdot \mathbf{X}_k(\mathbf{x}))) = I_k(\mathbf{x})
+\end{equation}
+
+where $\mathbf{X}_k(\mathbf{x})$ is the 3D point at pixel $\mathbf{x}$ in frame $k$ (requires known depth), and $\Delta\mathbf{T}$ is the relative motion to estimate.
+
+\subsection{Photometric Residual}
+
+The residual at pixel $\mathbf{x}$ for a candidate motion $\Delta\mathbf{T}$:
+\begin{equation}
+r(\mathbf{x}; \Delta\mathbf{T}) = I_{k+1}(\pi(\Delta\mathbf{T} \cdot \mathbf{X}_k(\mathbf{x}))) - I_k(\mathbf{x})
+\end{equation}
+
+\subsection{Objective Function}
+
+Minimize the sum of squared photometric residuals:
+\begin{equation}
+E_{\text{rgb}}(\Delta\mathbf{T}) = \sum_{\mathbf{x} \in \Omega} \rho\left(r(\mathbf{x}; \Delta\mathbf{T})\right)
+\end{equation}
+
+where $\Omega$ is the set of pixels with valid depth and $\rho$ is a robust loss function. For the simple case $\rho(r) = r^2$:
+\begin{equation}
+E_{\text{rgb}}(\Delta\mathbf{T}) = \sum_{\mathbf{x} \in \Omega} \left(I_{k+1}(\pi(\Delta\mathbf{T} \cdot \mathbf{X}_k(\mathbf{x}))) - I_k(\mathbf{x})\right)^2
+\end{equation}
+
+\subsection{Gauss-Newton Linearization}
+
+Linearize around current estimate $\Delta\mathbf{T}_0$. Let $\boldsymbol{\xi} \in \mathbb{R}^6$ be the incremental twist. The Jacobian of $r$ with respect to $\boldsymbol{\xi}$:
+
+\begin{equation}
+\mathbf{J}_r(\mathbf{x}) = \nabla I_{k+1} \cdot \frac{\partial \pi}{\partial \mathbf{X}} \cdot \frac{\partial (\mathbf{T} \mathbf{X})}{\partial \boldsymbol{\xi}} \bigg|_{\boldsymbol{\xi}=0}
+\end{equation}
+
+The normal equations:
+\begin{equation}
+\left(\sum_\mathbf{x} \mathbf{J}_r^T \mathbf{J}_r\right) \delta\boldsymbol{\xi} = -\sum_\mathbf{x} \mathbf{J}_r^T r(\mathbf{x})
+\end{equation}
+\begin{equation}
+\mathbf{H} \delta\boldsymbol{\xi} = -\mathbf{g}
+\end{equation}
+
+where $\mathbf{H} \approx \mathbf{J}^T\mathbf{J}$ is the Gauss-Newton approximation to the Hessian.
+
+\textbf{Note:} RGB odometry requires depth $\mathbf{X}_k(\mathbf{x})$ for 3D lifting. However, the depth preparation (scaling, downsampling) is \emph{separate} from the optimization.
+
+\section{Depth Odometry (Geometry-Based)}
+
+\subsection{Point-to-Plane ICP}
+
+Given corresponding 3D point pairs $(\mathbf{p}_i, \mathbf{q}_i)$ with surface normal $\mathbf{n}_i$ at $\mathbf{q}_i$:
+
+\begin{equation}
+E_{\text{depth}}(\mathbf{R}, \mathbf{t}) = \sum_{i=1}^{N} \left(\mathbf{n}_i^T (\mathbf{R}\mathbf{p}_i + \mathbf{t} - \mathbf{q}_i)\right)^2
+\end{equation}
+
+\begin{remark}
+Point-to-plane ICP converges quadratically near the solution, compared to linear convergence of point-to-point ICP.
+\end{remark}
+
+\subsection{Linearization for Small Rotations}
+
+For small $\boldsymbol{\omega}$, $\mathbf{R} \approx \mathbf{I} + [\boldsymbol{\omega}]_\times$:
+
+\begin{align}
+E_{\text{depth}} &\approx \sum_i \left(\mathbf{n}_i^T ([\boldsymbol{\omega}]_\times \mathbf{p}_i + \mathbf{t} + \mathbf{p}_i - \mathbf{q}_i)\right)^2 \\
+&= \sum_i \left(\mathbf{n}_i^T (-\mathbf{p}_i \times \boldsymbol{\omega} + \mathbf{t} + \mathbf{p}_i - \mathbf{q}_i)\right)^2
+\end{align}
+
+This is a standard linear least-squares problem in $(\boldsymbol{\omega}, \mathbf{t}) \in \mathbb{R}^6$.
+
+\section{RGB-D Odometry (Joint)}
+
+\subsection{Combined Objective}
+
+RGB-D odometry jointly minimizes both photometric and geometric residuals:
+
+\begin{equation}
+E(\Delta\mathbf{T}) = w_1 E_{\text{rgb}}(\Delta\mathbf{T}) + w_2 E_{\text{depth}}(\Delta\mathbf{T})
+\end{equation}
+
+Typical weights: $w_1 = w_2 = 1$ (after per-residual normalization by variance).
+
+\subsection{Joint Normal Equations}
+
+Stack both Jacobian matrices:
+\begin{equation}
+\mathbf{J} = \begin{pmatrix} \sqrt{w_1} \mathbf{J}_{\text{rgb}} \\ \sqrt{w_2} \mathbf{J}_{\text{depth}} \end{pmatrix}, \quad
+\mathbf{r} = \begin{pmatrix} \sqrt{w_1} \mathbf{r}_{\text{rgb}} \\ \sqrt{w_2} \mathbf{r}_{\text{depth}} \end{pmatrix}
+\end{equation}
+
+Solve: $(\mathbf{J}^T\mathbf{J})\delta\boldsymbol{\xi} = -\mathbf{J}^T\mathbf{r}$.
+
+\subsection{Coarse-to-Fine Pyramid}
+
+Both modes use image pyramids with $L$ levels:
+\begin{equation}
+I^{(l)} = \text{GaussianPyramid}(I, l), \quad l = 0, 1, \ldots, L-1
+\end{equation}
+
+At each level, the optimization solves for a motion update, with resolution:
+\begin{equation}
+\text{resolution}^{(l)} = \frac{W}{2^l} \times \frac{H}{2^l}
+\end{equation}
+
+Coarse-to-fine avoids local minima for large inter-frame motions.
+
+\section{The Bug: Unconditional Depth Assertion}
+
+\subsection{Bug Description}
+
+In OpenCV's \texttt{OdometryFrame} preprocessing, the function \texttt{prepareScaledDepth()} was called unconditionally:
+
+\begin{verbatim}
+void OdometryFrame::prepareDepth() {
+    // BUG: called even in RGB mode where depth is empty
+    prepareScaledDepth(depth, scaledDepth, cameraMatrix);
+}
+
+void prepareScaledDepth(InputArray depth, ...) {
+    CV_Assert(!depth.empty());  // FIRES in RGB mode!
+    // ...
+}
+\end{verbatim}
+
+When the user creates an \texttt{OdometryFrame} with only an RGB image (depth $= \emptyset$) and runs RGB-only odometry, the assertion fires.
+
+\subsection{Fix}
+
+Guard the depth preparation call:
+\begin{verbatim}
+void OdometryFrame::prepareDepth() {
+    if (!depth.empty()) {
+        prepareScaledDepth(depth, scaledDepth, cameraMatrix);
+    }
+    // In RGB-only mode, depth is empty and that's fine
+}
+\end{verbatim}
+
+Mathematically, RGB odometry requires depth for 3D back-projection during \emph{optimization}, but the scaled depth pyramid is not needed for the intensity matching step when depth is used directly from the OdometryFrame.
+
+\section{TikZ Figure: Odometry Mode Decision Tree}
+
+Figure~\ref{fig:odometry-modes} shows the three-mode decision tree and how the bug manifested.
+
+\begin{figure}[h!]
+\centering
+\begin{tikzpicture}[
+    node distance=1.6cm and 1.8cm,
+    decision/.style={draw, diamond, fill=yellow!25, aspect=2.5, font=\small, text centered, inner sep=2pt},
+    process/.style={draw, rectangle, rounded corners, fill=blue!15, minimum width=2.8cm, minimum height=0.8cm, font=\small, text centered},
+    terminal/.style={draw, rectangle, rounded corners, fill=green!20, minimum width=2.8cm, minimum height=0.8cm, font=\small, text centered},
+    bug/.style={draw, rectangle, rounded corners, fill=red!20, minimum width=3cm, minimum height=0.8cm, font=\small, text centered},
+    fix/.style={draw, rectangle, rounded corners, fill=green!30, minimum width=3cm, minimum height=0.8cm, font=\small, text centered},
+    >=Stealth
+]
+
+\node[decision] (mode) {odometryType?};
+
+% RGB branch
+\node[process, left=2.5cm of mode, yshift=-2cm] (rgb) {RGB mode\\(no depth needed)};
+\node[bug, below=1.2cm of rgb] (bug) {\textcolor{red}{BUG: prepareScaledDepth}\\called unconditionally\\$\Rightarrow$ assert(!depth.empty()) FIRES};
+\node[fix, below=1.2cm of bug] (fix) {\textcolor{green!50!black}{FIX: if (!depth.empty())}\\prepareScaledDepth(...)};
+
+% DEPTH branch
+\node[process, right=2.5cm of mode, yshift=-2cm] (depth) {DEPTH mode\\(depth required)};
+\node[terminal, below=1.2cm of depth] (depthok) {prepareScaledDepth()\\called (depth present)};
+
+% RGB-D branch
+\node[process, below=2cm of mode] (rgbd) {RGB-D mode\\(both needed)};
+\node[terminal, below=1.2cm of rgbd] (rgbdok) {both rgb \& depth\\prepared};
+
+% Arrows from decision
+\draw[->] (mode) -- node[above, font=\footnotesize] {RGB} (rgb);
+\draw[->] (mode) -- node[right, font=\footnotesize] {RGB-D} (rgbd);
+\draw[->] (mode) -- node[above, font=\footnotesize] {DEPTH} (depth);
+
+% RGB path
+\draw[->, dashed, red] (rgb) -- (bug);
+\draw[->, thick, green!60!black] (bug) -- (fix);
+
+% Other paths
+\draw[->] (depth) -- (depthok);
+\draw[->] (rgbd) -- (rgbdok);
+
+\end{tikzpicture}
+\caption{Odometry mode decision tree. In RGB mode, depth is empty. Before the fix (red), \texttt{prepareScaledDepth()} was called unconditionally, triggering the assertion. After the fix (green), the call is guarded by \texttt{if (!depth.empty())}.}
+\label{fig:odometry-modes}
+\end{figure}
+
+\section{Complexity Analysis}
+
+\subsection{Per-Iteration Cost}
+
+For an image of size $W \times H$ and $6$ unknowns (the twist $\boldsymbol{\xi} \in \mathbb{R}^6$):
+
+\begin{align}
+\text{Jacobian computation: } & O(WH) \text{ pixel-wise operations} \\
+\text{Normal matrix assembly: } & O(WH \cdot 36) = O(WH) \\
+\text{Linear system solve: } & O(6^3) = O(216) \approx O(1)
+\end{align}
+
+\subsection{Pyramid Speedup}
+
+With a $L$-level pyramid, total pixels processed:
+\begin{equation}
+\sum_{l=0}^{L-1} \frac{WH}{4^l} = WH \cdot \frac{1 - (1/4)^L}{1 - 1/4} \leq \frac{4}{3} WH
+\end{equation}
+
+So the pyramid adds only a constant factor $4/3$ overhead while drastically improving convergence.
+
+\section{References}
+
+\begin{enumerate}
+  \item Steinbr\"{u}cker, F., Sturm, J., Cremers, D. \textit{Real-Time Visual Odometry from Dense RGB-D Images}. ICCV Workshops, 2011.
+  \item Kerl, C., Sturm, J., Cremers, D. \textit{Robust Odometry Estimation for RGB-D Cameras}. ICRA, 2013.
+  \item Engel, J., Koltun, V., Cremers, D. \textit{Direct Sparse Odometry}. IEEE TPAMI, 2018.
+  \item Besl, P., McKay, N. \textit{A Method for Registration of 3-D Shapes}. IEEE TPAMI, 1992.
+  \item OpenCV 3D/ptcloud Module. \textit{odometry.cpp}. OpenCV repository.
+\end{enumerate}
+
+\end{document}
