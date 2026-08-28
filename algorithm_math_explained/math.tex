@@ -1,0 +1,356 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc,decorations.pathreplacing}
+\geometry{margin=1in}
+
+\title{Stereo Rectification: Epipolar Geometry, Homography Computation,\\and Valid Pixel ROI Calculation}
+\author{OpenCV Fix Branch: fix/issue-7240-stereorectify-fov-complex}
+\date{\today}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+Stereo rectification transforms a pair of stereo images so that corresponding
+points lie on the same horizontal scan line in both images. This simplifies the
+stereo matching problem from a 2-D search to a 1-D search along horizontal lines,
+and is a prerequisite for efficient disparity computation. This document derives
+the full mathematics of stereo rectification as implemented in
+\texttt{cv::stereoRectify}, including the epipolar geometry, Bouguet's
+rectification homographies, the $\alpha$ parameter for valid-pixel ROI, and the
+off-by-one bug in ROI width computation that was fixed in this branch.
+
+\section{Epipolar Geometry}
+
+\subsection{Camera Projection Model}
+A perspective camera projects a 3-D point $\mathbf{X} \in \mathbb{R}^3$ to an
+image point $\mathbf{x} \in \mathbb{R}^2$ via:
+\begin{equation}
+  \lambda \tilde{\mathbf{x}} = \mathbf{K} [\mathbf{R} \mid \mathbf{t}] \tilde{\mathbf{X}},
+\end{equation}
+where $\tilde{\cdot}$ denotes homogeneous coordinates, $\mathbf{K}$ is the
+$3\times3$ intrinsic matrix, $\mathbf{R} \in SO(3)$ is the rotation, and
+$\mathbf{t} \in \mathbb{R}^3$ is the translation. For a stereo rig with left and
+right cameras:
+\begin{align}
+  \mathbf{P}_L &= \mathbf{K}_L [\mathbf{I} \mid \mathbf{0}], \\
+  \mathbf{P}_R &= \mathbf{K}_R [\mathbf{R} \mid \mathbf{t}].
+\end{align}
+
+\subsection{The Essential Matrix}
+The essential matrix $\mathbf{E}$ encodes the rigid transformation between
+cameras. Given the skew-symmetric cross-product matrix
+\begin{equation}
+  [\mathbf{t}]_\times =
+  \begin{pmatrix} 0 & -t_3 & t_2 \\ t_3 & 0 & -t_1 \\ -t_2 & t_1 & 0 \end{pmatrix},
+\end{equation}
+the essential matrix is:
+\begin{equation}
+  \mathbf{E} = [\mathbf{t}]_\times \mathbf{R}.
+\end{equation}
+It satisfies the epipolar constraint for normalised (calibrated) coordinates
+$\hat{\mathbf{x}}_L = \mathbf{K}_L^{-1}\tilde{\mathbf{x}}_L$ and
+$\hat{\mathbf{x}}_R = \mathbf{K}_R^{-1}\tilde{\mathbf{x}}_R$:
+\begin{equation}
+  \hat{\mathbf{x}}_R^T \mathbf{E} \, \hat{\mathbf{x}}_L = 0.
+\end{equation}
+
+\subsection{The Fundamental Matrix}
+Working in pixel coordinates, the fundamental matrix is:
+\begin{equation}
+  \mathbf{F} = \mathbf{K}_R^{-T} \mathbf{E} \, \mathbf{K}_L^{-1}
+             = \mathbf{K}_R^{-T} [\mathbf{t}]_\times \mathbf{R} \, \mathbf{K}_L^{-1},
+\end{equation}
+and satisfies
+\begin{equation}
+  \mathbf{x}_R^T \mathbf{F} \, \mathbf{x}_L = 0
+\end{equation}
+for every pair of corresponding pixel coordinates $(\mathbf{x}_L, \mathbf{x}_R)$.
+
+\subsection{Epipoles}
+The epipole is the image of one camera centre in the other camera. Concretely:
+\begin{align}
+  \mathbf{e}_L &= \mathbf{K}_L \mathbf{R}^T \mathbf{t} \quad
+                  \text{(right camera centre projected into left image)}, \\
+  \mathbf{e}_R &= \mathbf{K}_R (-\mathbf{t}) \quad
+                  \text{(left camera centre projected into right image)}.
+\end{align}
+Every epipolar line in the left image passes through $\mathbf{e}_L$; every
+epipolar line in the right image passes through $\mathbf{e}_R$.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth, scale=1.0]
+  % Left camera
+  \draw[thick,blue!70!black,fill=blue!10] (-4,0) -- (-3.5,0.8) -- (-3.5,-0.8) -- cycle;
+  \node[below] at (-4,0) {$\mathbf{C}_L$};
+  % Right camera
+  \draw[thick,red!70!black,fill=red!10] (4,0) -- (3.5,0.8) -- (3.5,-0.8) -- cycle;
+  \node[below] at (4,0) {$\mathbf{C}_R$};
+  % 3D point
+  \filldraw[black] (0,3) circle (2pt) node[above] {$\mathbf{X}$};
+  % Rays
+  \draw[blue!70!black,dashed] (-4,0) -- (0,3);
+  \draw[red!70!black,dashed] (4,0) -- (0,3);
+  % Baseline
+  \draw[thick,gray] (-4,0) -- (4,0) node[midway,below] {Baseline $B=\|\mathbf{t}\|$};
+  % Epipolar plane shading
+  \fill[yellow!20,opacity=0.5] (-4,0) -- (0,3) -- (4,0) -- cycle;
+  \node[gray] at (0,1.2) {Epipolar plane};
+  % Image planes (vertical lines)
+  \draw[blue!50,thick] (-3,2.2) -- (-3,-0.5);
+  \draw[red!50,thick] (3,2.2) -- (3,-0.5);
+  % Projected points
+  \filldraw[blue!70!black] (-3,1.5) circle (2.5pt) node[left] {$\mathbf{x}_L$};
+  \filldraw[red!70!black] (3,1.5) circle (2.5pt) node[right] {$\mathbf{x}_R$};
+  % Epipolar lines on image planes
+  \draw[blue!60,very thick] (-3,2.0) -- (-3,0.5) node[midway,right,font=\scriptsize] {epipolar line};
+  \draw[red!60,very thick] (3,2.0) -- (3,0.5);
+  % Epipoles
+  \filldraw[blue!80] (-3,-0.2) circle (2.5pt) node[left] {$\mathbf{e}_L$};
+  \filldraw[red!80] (3,-0.2) circle (2.5pt) node[right] {$\mathbf{e}_R$};
+\end{tikzpicture}
+\caption{Epipolar geometry. The two camera centres $\mathbf{C}_L, \mathbf{C}_R$,
+the 3-D point $\mathbf{X}$, and their projections $\mathbf{x}_L, \mathbf{x}_R$
+all lie in the same epipolar plane. Epipolar lines in both images pass through
+the respective epipoles.}
+\end{figure}
+
+\section{Stereo Rectification Goal}
+
+After rectification every pair of corresponding points shares the same $y$
+coordinate (lies on the same horizontal scan line). This means:
+\begin{equation}
+  y_L^{\text{rect}} = y_R^{\text{rect}}
+\end{equation}
+for every pair $(\mathbf{x}_L^{\text{rect}}, \mathbf{x}_R^{\text{rect}})$.
+The horizontal disparity then directly encodes depth:
+\begin{equation}
+  d = x_L^{\text{rect}} - x_R^{\text{rect}}, \qquad
+  Z = \frac{f \cdot B}{d},
+\end{equation}
+where $f$ is the common focal length of the rectified cameras, $B = \|\mathbf{t}\|$
+is the baseline, and $d > 0$ for points in front of the cameras.
+
+\section{Rectification Homographies: Bouguet's Method}
+
+\subsection{Rotation to a Common Direction}
+Given stereo rotation $\mathbf{R}$ (right-to-left), the goal is to find rotations
+$\mathbf{R}_L, \mathbf{R}_R$ such that both cameras look in the same direction
+and epipolar lines become horizontal.
+
+\paragraph{Step 1: Symmetric rotation split.}
+Compute the matrix square root to split the rotation symmetrically:
+\begin{equation}
+  \mathbf{R}_{\text{mid}} = \mathbf{R}^{1/2}, \quad
+  \mathbf{R}_L = \mathbf{R}_{\text{mid}}^T, \quad
+  \mathbf{R}_R = \mathbf{R}_{\text{mid}}.
+\end{equation}
+Concretely, if $\mathbf{R} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^T$ then
+$\mathbf{R}^{1/2}$ is obtained from the angle-axis representation:
+$\mathbf{R} = \exp([\boldsymbol{\omega}]_\times) \Rightarrow
+\mathbf{R}^{1/2} = \exp\!\left(\tfrac{1}{2}[\boldsymbol{\omega}]_\times\right)$.
+
+\paragraph{Step 2: Align baseline with $x$-axis.}
+Let $\hat{\mathbf{e}}_1 = \mathbf{t}/\|\mathbf{t}\|$. Build an orthonormal frame:
+\begin{align}
+  \mathbf{r}_1 &= \hat{\mathbf{e}}_1, \\
+  \mathbf{r}_2 &= \hat{\mathbf{e}}_1 \times \hat{\mathbf{z}} / \|\cdot\|, \\
+  \mathbf{r}_3 &= \mathbf{r}_1 \times \mathbf{r}_2,
+\end{align}
+and set the additional rotation $\mathbf{R}_{\text{rect}} = [\mathbf{r}_1 | \mathbf{r}_2 | \mathbf{r}_3]^T$.
+
+\subsection{Rectification Homographies}
+The rectifying homographies in pixel space are:
+\begin{equation}
+  \mathbf{H}_L = \mathbf{K}' \mathbf{R}_L \mathbf{K}_L^{-1}, \qquad
+  \mathbf{H}_R = \mathbf{K}' \mathbf{R}_R \mathbf{K}_R^{-1},
+\end{equation}
+where $\mathbf{K}'$ is the new (common) camera matrix computed from the original
+intrinsics, $\mathbf{R}$, $\mathbf{t}$, and the free scale parameter $\alpha$:
+\begin{equation}
+  \mathbf{K}' = \text{newCameraMatrix}(\mathbf{K}_L, \mathbf{K}_R, \mathbf{R},
+                                        \mathbf{t}, \alpha).
+\end{equation}
+
+\subsection{Proof that Epipolar Lines Become Horizontal}
+After applying $\mathbf{H}_L, \mathbf{H}_R$, the new epipole is at infinity along
+the $x$-axis: $\mathbf{e}'_L = \mathbf{e}'_R = (1,0,0)^T$. Since all epipolar
+lines pass through the epipole, they are all horizontal lines $y = c$.
+
+\section{Valid Pixel Region: The $\alpha$ Parameter}
+
+\subsection{Definition}
+The parameter $\alpha \in [0, 1]$ controls the trade-off between valid-pixel
+coverage and image area:
+\begin{itemize}
+  \item $\alpha = 0$: ROI is the \emph{intersection} of the back-projected left
+    and right image boundaries. Every output pixel is valid (no black borders).
+  \item $\alpha = 1$: ROI is the \emph{union} of the back-projected left
+    and right image boundaries. All source pixels appear somewhere in the output.
+  \item $0 < \alpha < 1$: linear interpolation between the two extremes.
+\end{itemize}
+
+\subsection{Intersection ROI Computation}
+Let $\Omega_L$ and $\Omega_R$ be the image domains of the left and right images,
+and $\mathbf{H}_L, \mathbf{H}_R$ the rectifying homographies. The valid rectified
+domain is:
+\begin{equation}
+  \Omega_{\text{valid}} = \mathbf{H}_L(\Omega_L) \cap \mathbf{H}_R(\Omega_R).
+\end{equation}
+For axis-aligned rectangles, the intersection is the rectangle with:
+\begin{align}
+  x_{\min} &= \max\!\left(x_{\min}^L,\; x_{\min}^R\right), &
+  x_{\max} &= \min\!\left(x_{\max}^L,\; x_{\max}^R\right), \\
+  y_{\min} &= \max\!\left(y_{\min}^L,\; y_{\min}^R\right), &
+  y_{\max} &= \min\!\left(y_{\max}^L,\; y_{\max}^R\right).
+\end{align}
+
+\section{The Off-by-One Bug and Its Fix}
+
+\subsection{Floating-Point Boundaries to Integer Pixels}
+The homography-projected boundary values $x_{\min}, x_{\max}$ are
+floating-point. Converting to integer pixel indices must be done carefully:
+\begin{align}
+  \hat{x}_{\min} &= \lceil x_{\min} \rceil
+    \quad\text{(round up, so the pixel is fully inside)}, \\
+  \hat{x}_{\max} &= \lfloor x_{\max} \rfloor
+    \quad\text{(round down, so the pixel is fully inside)}.
+\end{align}
+The integer pixel width is then:
+\begin{equation}
+  w = \hat{x}_{\max} - \hat{x}_{\min} + 1.
+\end{equation}
+
+\subsection{The Bug}
+The buggy implementation applied \texttt{cvFloor} to \emph{both} $x_{\min}$ and
+$x_{\max}$:
+\begin{equation}
+  w_{\text{bug}} = \lfloor x_{\max} \rfloor - \lfloor x_{\min} \rfloor,
+\end{equation}
+which underestimates the width by 1 when $x_{\min}$ is not an integer (the
+ceiling is strictly greater than the floor). Concretely, if
+$x_{\min} = 2.3$ and $x_{\max} = 10.7$:
+\begin{align}
+  w_{\text{bug}} &= 10 - 2 = 8, \\
+  w_{\text{fix}} &= 10 - 3 + 1 = 8 \quad \longrightarrow \quad
+  \text{(ceiling of 2.3 is 3, floor of 10.7 is 10, width = 8).}
+\end{align}
+More critically, when $x_{\min}$ is already an integer, e.g.\ $x_{\min} = 3.0$:
+\begin{align}
+  w_{\text{bug}} &= \lfloor 10.7 \rfloor - \lfloor 3.0 \rfloor = 7, \\
+  w_{\text{fix}} &= \lfloor 10.7 \rfloor - \lceil 3.0 \rceil + 1 = 10 - 3 + 1 = 8.
+\end{align}
+The bug causes the ROI to be one pixel narrower, cropping a valid pixel column.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth]
+  % Number line
+  \draw[->] (-0.5,0) -- (12,0) node[right] {$x$};
+  \foreach \x in {0,1,...,11}
+    \draw (\x,0.08) -- (\x,-0.08) node[below,font=\tiny] {\x};
+
+  % Floating-point bounds
+  \draw[blue,very thick] (2.3,0.5) -- (2.3,-0.5) node[below,blue,font=\small] {$x_{\min}=2.3$};
+  \draw[red,very thick] (10.7,0.5) -- (10.7,-0.5) node[below,red,font=\small] {$x_{\max}=10.7$};
+
+  % Bug: floor both
+  \draw[orange,thick,<->] (2,-0.9) -- (10,-0.9);
+  \node[orange,font=\small] at (6,-1.3) {Bug: $\lfloor 2.3\rfloor=2$ to $\lfloor 10.7\rfloor=10$, width $= 8$};
+
+  % Fix: ceil min, floor max, +1
+  \draw[green!60!black,thick,<->] (3,0.9) -- (10,0.9);
+  \node[green!60!black,font=\small] at (6.5,1.3) {Fix: $\lceil 2.3\rceil=3$ to $\lfloor 10.7\rfloor=10$, width $= 10-3+1 = 8$};
+
+  % Valid pixel region
+  \foreach \x in {3,4,...,10}
+    \fill[green!30] (\x-0.45,-0.35) rectangle (\x+0.45,0.35);
+  \fill[orange!40] (2-0.45,-0.35) rectangle (2+0.45,0.35);
+  \node[font=\scriptsize,orange] at (2,0.6) {floor only!};
+\end{tikzpicture}
+\caption{ROI boundary computation. The bug applies \texttt{cvFloor} to both
+bounds, potentially including pixel $x=2$ which lies outside the valid region.
+The fix uses \texttt{cvCeil} for the lower bound and adds 1 to the width.}
+\end{figure}
+
+\section{Depth from Disparity}
+
+\begin{theorem}[Triangulation from Disparity]
+For a rectified stereo pair with baseline $B$ and focal length $f$, the depth of
+a 3-D point $\mathbf{X}$ with horizontal disparity $d = x_L - x_R > 0$ is:
+\begin{equation}
+  Z = \frac{f \cdot B}{d}.
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+In the left rectified camera frame, the projection gives
+$x_L = f X/Z + c_x$ and in the right camera (offset by baseline):
+$x_R = f(X - B)/Z + c_x$.
+Subtracting: $d = x_L - x_R = fB/Z$, hence $Z = fB/d$.
+\end{proof}
+
+\noindent The $Q$ matrix (disparity-to-depth) encodes this transformation:
+\begin{equation}
+  Q = \begin{pmatrix}
+    1 & 0 & 0 & -c_x \\
+    0 & 1 & 0 & -c_y \\
+    0 & 0 & 0 & f \\
+    0 & 0 & -1/B & (c_x - c_x')/B
+  \end{pmatrix},
+\end{equation}
+so that $(X,Y,Z,W)^T = Q (x,y,d,1)^T$ with $\mathbf{X}_{\text{3D}} = (X/W, Y/W, Z/W)$.
+
+\section{Summary}
+
+The stereoRectify computation proceeds as follows:
+\begin{enumerate}
+  \item Decompose the stereo rotation $\mathbf{R}$ into two symmetric half-rotations.
+  \item Build an additional rotation aligning the baseline with the $x$-axis.
+  \item Compute rectifying homographies $\mathbf{H}_L, \mathbf{H}_R$.
+  \item Project image corners through $\mathbf{H}_L, \mathbf{H}_R$ to find the
+        valid rectified region.
+  \item Apply ceiling/floor rounding correctly to convert floating-point bounds
+        to integer pixel ROIs, adding 1 to account for the inclusive endpoint.
+\end{enumerate}
+
+The off-by-one fix in this branch corrects step 5 by using
+$\hat{x}_{\min} = \lceil x_{\min} \rceil$ instead of $\lfloor x_{\min} \rfloor$
+and computing $w = \hat{x}_{\max} - \hat{x}_{\min} + 1$.
+
+\begin{thebibliography}{9}
+\bibitem{bouguet2001}
+  J.-Y.\ Bouguet,
+  \textit{Camera Calibration Toolbox for MATLAB},
+  California Institute of Technology, 2001.
+
+\bibitem{hartley2003}
+  R.\ Hartley and A.\ Zisserman,
+  \textit{Multiple View Geometry in Computer Vision}, 2nd ed.
+  Cambridge University Press, 2003.
+
+\bibitem{opencv_stereo}
+  OpenCV Development Team,
+  \textit{cv::stereoRectify documentation},
+  \url{https://docs.opencv.org/master/d9/d0c/group__calib3d.html}, 2024.
+
+\bibitem{loop1999}
+  C.\ Loop and Z.\ Zhang,
+  ``Computing rectifying homographies for stereo vision,''
+  in \textit{Proc.\ CVPR}, 1999.
+\end{thebibliography}
+
+\end{document}
