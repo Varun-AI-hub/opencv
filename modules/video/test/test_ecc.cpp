@@ -503,5 +503,69 @@ TEST(Video_ECC_BoolMask, matches_uchar_mask) {
 
     EXPECT_LE(cv::norm(warp_bool, warp_uchar, NORM_INF), 1e-5);
 }
+// Regression test for issue #29774: findTransformECC systematically
+// under-estimates scale for MOTION_AFFINE / MOTION_HOMOGRAPHY when
+// GaussianBlur uses BORDER_REFLECT_101 (the previous default).  The fix
+// switches both template and image blurs to BORDER_CONSTANT (zero-pad) so
+// that reflected border pixels contribute zero to the coordinate-weighted
+// Jacobian columns that encode scale.
+//
+// The test applies a known 1.005x uniform scale and checks that ECC recovers
+// it to within 1e-4 (the old bias was ~2.8e-4).
+TEST(Video_ECC_ScaleBias, affine_no_systematic_under_estimate)
+{
+    // Build a smooth synthetic image that has enough texture for ECC.
+    const int SZ = 128;
+    Mat templateImage(SZ, SZ, CV_32F);
+    for (int r = 0; r < SZ; r++)
+        for (int c = 0; c < SZ; c++)
+            templateImage.at<float>(r, c) =
+                std::sin(r * 0.2f) * std::cos(c * 0.17f) +
+                std::sin(r * 0.07f + c * 0.13f);
+
+    // Ground-truth warp: 1.005x isotropic scale, no translation.
+    const float trueScale = 1.005f;
+    Mat groundMap = (Mat_<float>(2, 3) << trueScale, 0.f, 0.f,
+                                          0.f, trueScale, 0.f);
+
+    Mat inputImage;
+    warpAffine(templateImage, inputImage, groundMap, Size(SZ, SZ),
+               INTER_LINEAR + WARP_INVERSE_MAP);
+
+    // Accumulate mean relative scale error over multiple trials to expose
+    // systematic bias (single-trial noise is larger than 2.8e-4, but the
+    // mean converges quickly).
+    const int NTRIALS = 20;
+    double sumScaleErr = 0.0;
+    const TermCriteria criteria(TermCriteria::COUNT + TermCriteria::EPS, 200, 1e-7);
+
+    for (int t = 0; t < NTRIALS; t++)
+    {
+        // Small random perturbation of the starting point so each trial
+        // exercises a slightly different convergence path.
+        float dx = (t % 5 - 2) * 0.5f;
+        float dy = (t / 5 - 2) * 0.5f;
+        Mat initMap = (Mat_<float>(2, 3) << 1.f, 0.f, dx,
+                                            0.f, 1.f, dy);
+
+        // Use gaussFiltSize=5, matching the default that exposed the bias.
+        findTransformECC(templateImage, inputImage, initMap,
+                         MOTION_AFFINE, criteria, noArray(), 5);
+
+        // Recovered scale is the average of the two diagonal entries.
+        float recoveredScale = (initMap.at<float>(0,0) + initMap.at<float>(1,1)) / 2.f;
+        sumScaleErr += (recoveredScale - trueScale) / trueScale;
+    }
+
+    double meanRelErr = sumScaleErr / NTRIALS;
+
+    // Before the fix the mean was ~-2.8e-4 (systematic under-estimate).
+    // After the fix it must be within ±1e-4.
+    EXPECT_NEAR(meanRelErr, 0.0, 1e-4)
+        << "Mean relative scale error = " << meanRelErr
+        << " (threshold 1e-4). "
+           "A large negative value indicates the BORDER_REFLECT_101 "
+           "scale bias has returned (issue #29774).";
+}
 }  // namespace
 }  // namespace opencv_test

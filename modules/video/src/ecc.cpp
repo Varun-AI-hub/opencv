@@ -437,12 +437,19 @@ double cv::findTransformECCWithMask( InputArray templateImage,
     Mat imageWarped = Mat(hs, ws, type);    // to store the warped zero-mean input image
     Mat imageMask = Mat(hs, ws, CV_8U);     // to store the final mask
 
-    // Gaussian filtering is optional
+    // Gaussian filtering is optional.
+    // Use BORDER_CONSTANT (zero-pad) instead of the default BORDER_REFLECT_101.
+    // BORDER_REFLECT_101 extrapolates a ring of gaussFiltSize/2 pixels around the
+    // border using reflected (not measured) data.  For the scale/shear Jacobian
+    // columns those contributions are weighted by grid coordinates (gradientX * Xgrid)
+    // and do NOT cancel, introducing a systematic scale bias of ~2.8e-4 per
+    // 200 trials (issue #29774).  Zero-padding gives phantom pixels a value of 0,
+    // so the reflected gradients are zero and the bias vanishes.
     src.convertTo(templateFloat, templateFloat.type());
-    GaussianBlur(templateFloat, templateFloat, Size(gaussFiltSize, gaussFiltSize), 0, 0);
+    GaussianBlur(templateFloat, templateFloat, Size(gaussFiltSize, gaussFiltSize), 0, 0, BORDER_CONSTANT);
 
     dst.convertTo(imageFloat, imageFloat.type());
-    GaussianBlur(imageFloat, imageFloat, Size(gaussFiltSize, gaussFiltSize), 0, 0);
+    GaussianBlur(imageFloat, imageFloat, Size(gaussFiltSize, gaussFiltSize), 0, 0, BORDER_CONSTANT);
 
     // needed matrices for gradients and warped gradients
     Mat gradientX = Mat::zeros(hd, wd, type);
