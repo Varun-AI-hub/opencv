@@ -1,0 +1,246 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes,calc}
+
+\geometry{margin=1in}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+
+\title{\textbf{Centroid Computation Under Threshold Inversion:\\
+Why \texttt{THRESH\_BINARY\_INV} Matters in SimpleBlobDetector}\\
+\large Mathematical Documentation for OpenCV Issue \#24388}
+\author{OpenCV Fix Branch: \texttt{fix/issue-24388-blobdetector-inverted}}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%-----------------------------------------------------------------------
+\section{Introduction}
+
+OpenCV's \texttt{SimpleBlobDetector} detects blobs (coherent regions)
+in images by applying a series of thresholds and computing the
+properties (centroid, area, circularity, etc.) of the resulting
+connected components.
+
+Issue \#24388 identified that when \texttt{blobColor = 0} (requesting
+dark blobs), the detector applied the wrong threshold direction
+(\texttt{THRESH\_BINARY} instead of \texttt{THRESH\_BINARY\_INV}),
+causing it to detect the \emph{background} rather than the blobs and
+reporting wildly incorrect centroids.
+
+%-----------------------------------------------------------------------
+\section{Image Moments and Centroid}
+
+\subsection{Raw Moments}
+
+\begin{definition}[Raw Image Moments]
+For a discrete image $I : \mathbb{Z}^2 \to \mathbb{R}$, the raw moment
+of order $(p, q)$ is:
+\[
+  m_{pq} = \sum_{x} \sum_{y} x^p \, y^q \, I(x, y)
+\]
+\end{definition}
+
+\begin{definition}[Centroid]
+The centroid $(\bar{x}, \bar{y})$ of the intensity distribution is:
+\[
+  \bar{x} = \frac{m_{10}}{m_{00}}, \qquad
+  \bar{y} = \frac{m_{01}}{m_{00}}
+\]
+where $m_{00} = \sum_{x} \sum_{y} I(x,y)$ is the \emph{zeroth moment}
+(total mass / number of foreground pixels for a binary image).
+\end{definition}
+
+\subsection{Binary Image Interpretation}
+
+For a binary image $I \in \{0, 255\}$, after normalisation:
+\[
+  m_{00} = 255 \times N_{\text{fg}}
+\]
+where $N_{\text{fg}}$ is the number of foreground pixels.  The centroid
+formula reduces to:
+\[
+  \bar{x} = \frac{\sum_{(x,y)\,:\,I(x,y)>0} x}{N_{\text{fg}}}, \qquad
+  \bar{y} = \frac{\sum_{(x,y)\,:\,I(x,y)>0} y}{N_{\text{fg}}}
+\]
+
+%-----------------------------------------------------------------------
+\section{Threshold Inversion and Its Effect on Centroids}
+
+\subsection{Threshold Operations}
+
+Let $\theta$ be the threshold value and $I_{\text{src}}$ be the source
+image.  OpenCV defines:
+
+\begin{align*}
+  \text{THRESH\_BINARY}: &\quad
+    I_{\text{dst}}(x,y) =
+      \begin{cases} 255 & \text{if } I_{\text{src}}(x,y) > \theta \\
+                    0   & \text{otherwise} \end{cases} \\[6pt]
+  \text{THRESH\_BINARY\_INV}: &\quad
+    I_{\text{dst}}(x,y) =
+      \begin{cases} 0   & \text{if } I_{\text{src}}(x,y) > \theta \\
+                    255 & \text{otherwise} \end{cases}
+\end{align*}
+
+Note that $\text{THRESH\_BINARY\_INV}(I) = 255 - \text{THRESH\_BINARY}(I)$
+(pixel-wise complement for binary images).
+
+\subsection{Scenario: Dark Blob on Bright Background}
+
+Let the image consist of:
+\begin{itemize}
+  \item A blob $B$ of $N$ pixels with value $v_{\text{blob}} < \theta$
+        (dark region, e.g., value 50)
+  \item Background of $M$ pixels with value $v_{\text{bg}} > \theta$
+        (bright region, e.g., value 200)
+\end{itemize}
+
+\paragraph{Correct behaviour (THRESH\_BINARY\_INV):}
+Background pixels (value $> \theta$) $\to 0$, blob pixels ($\leq \theta$) $\to 255$.
+\[
+  \text{foreground} = B \Rightarrow \bar{x}_{\text{correct}} = \frac{\sum_{(x,y) \in B} x}{N}
+\]
+This is the true centroid of the blob.
+
+\paragraph{Buggy behaviour (THRESH\_BINARY):}
+Blob pixels (value $\leq \theta$) $\to 0$, background pixels $\to 255$.
+\[
+  \text{foreground} = \text{background} \Rightarrow
+  \bar{x}_{\text{buggy}} = \frac{\sum_{(x,y) \notin B} x}{M}
+\]
+This is the centroid of the \emph{background region}, which may be far
+from the actual blob.
+
+\subsection{Quantitative Error Analysis}
+
+Let the image be $W \times H$.  Assume the blob is a circle of radius $r$
+centred at $(c_x, c_y)$ (so $N \approx \pi r^2$) and the background
+is everything else ($M = WH - N$).
+
+The buggy centroid in the $x$-direction:
+\[
+  \bar{x}_{\text{buggy}} = \frac{\sum_{x=0}^{W-1} x \cdot W_x - \sum_{(x,y) \in B} x}{M}
+  \approx \frac{W(W-1)/2 - c_x N}{WH - N}
+\]
+
+The error $\bar{x}_{\text{buggy}} - c_x$ is of order $W/2 - c_x$, i.e.,
+the reported centroid can be off by nearly \emph{half the image width}
+for a centrally-located blob.
+
+%-----------------------------------------------------------------------
+\section{The Bug and Its Fix}
+
+\subsection{Relevant Code Path}
+
+In \texttt{SimpleBlobDetector::findBlobs()}, the relevant step is:
+\begin{enumerate}
+  \item Threshold the image at multiple levels $\theta_1 < \theta_2 < \ldots$
+  \item Find connected components in each thresholded image
+  \item Group components across threshold levels
+\end{enumerate}
+
+The bug: when \texttt{params.blobColor == 0} the code selected
+\texttt{THRESH\_BINARY} (which keeps bright pixels), but should have
+selected \texttt{THRESH\_BINARY\_INV} (which keeps dark pixels).
+
+\subsection{Mathematical Statement of the Fix}
+
+\[
+  \text{threshold type} =
+  \begin{cases}
+    \text{THRESH\_BINARY}     & \text{if blobColor} = 255\; (\text{bright blobs}) \\
+    \text{THRESH\_BINARY\_INV} & \text{if blobColor} = 0\;   (\text{dark blobs})
+  \end{cases}
+\]
+
+After the fix, the foreground pixels after thresholding always correspond
+to the desired blob polarity, so the centroid formula correctly locates
+the blob.
+
+%-----------------------------------------------------------------------
+\section{TikZ Figure: Correct vs.\ Buggy Threshold Selection}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.55]
+
+% Image layout: 9x9 grid, bright background (200), dark blob centre 3x3 at (3,3)
+% Row/col 0-indexed
+% Highlight blob cells (rows 3-5, cols 3-5) as dark
+% Bright background elsewhere
+
+% Define blob region (rows 3,4,5 cols 3,4,5)
+\foreach \r in {0,...,8} {
+  \foreach \c in {0,...,8} {
+    \pgfmathsetmacro{\isblob}{ifthenelse(\r>=3 && \r<=5 && \c>=3 && \c<=5,1,0)}
+    \pgfmathsetmacro{\fillcol}{ifthenelse(\isblob>0.5,"gray!70","white")}
+    \pgfmathsetmacro{\lbl}{ifthenelse(\isblob>0.5,"50","200")}
+    \node[draw, minimum size=0.55cm, fill=\fillcol, font=\tiny] at (\c*0.55, -\r*0.55) {};
+  }
+}
+\node[above] at (2.2, 0.4) {\textbf{Input (dark blob on bright bg)}};
+
+%-- THRESH_BINARY (buggy): keeps bright (200>128), dark→0
+\begin{scope}[xshift=6.5cm]
+\foreach \r in {0,...,8} {
+  \foreach \c in {0,...,8} {
+    \pgfmathsetmacro{\isblob}{ifthenelse(\r>=3 && \r<=5 && \c>=3 && \c<=5,1,0)}
+    \pgfmathsetmacro{\fillcol}{ifthenelse(\isblob>0.5,"white","blue!35")}
+    \node[draw, minimum size=0.55cm, fill=\fillcol, font=\tiny] at (\c*0.55, -\r*0.55) {};
+  }
+}
+% Mark buggy centroid (approx centre of background, shifted from centre of image)
+\fill[red] (2.2*0.55, -4*0.55) circle (0.12cm);
+\node[red, font=\tiny, right] at (2.2*0.55+0.15, -4*0.55) {buggy centroid};
+\node[above] at (2.2, 0.4) {\textcolor{red}{\textbf{THRESH\_BINARY (WRONG)}}};
+\end{scope}
+
+%-- THRESH_BINARY_INV (fix): keeps dark (50<128), bright→0
+\begin{scope}[xshift=13cm]
+\foreach \r in {0,...,8} {
+  \foreach \c in {0,...,8} {
+    \pgfmathsetmacro{\isblob}{ifthenelse(\r>=3 && \r<=5 && \c>=3 && \c<=5,1,0)}
+    \pgfmathsetmacro{\fillcol}{ifthenelse(\isblob>0.5,"green!50","white")}
+    \node[draw, minimum size=0.55cm, fill=\fillcol, font=\tiny] at (\c*0.55, -\r*0.55) {};
+  }
+}
+% Mark correct centroid (centre of blob = (4,4) in 0-indexed)
+\fill[green!70!black] (4*0.55, -4*0.55) circle (0.12cm);
+\node[green!70!black, font=\tiny, right] at (4*0.55+0.15, -4*0.55) {correct centroid};
+\node[above] at (2.2, 0.4) {\textcolor{green!70!black}{\textbf{THRESH\_BINARY\_INV (FIX)}}};
+\end{scope}
+
+\end{tikzpicture}
+\end{center}
+
+%-----------------------------------------------------------------------
+\section{References}
+
+\begin{enumerate}
+  \item G.\ Bradski and A.\ Kaehler.
+        \emph{Learning OpenCV: Computer Vision with the OpenCV Library}.
+        O'Reilly Media, 2008.
+  \item A.\ Rosenfeld and A.\ C.\ Kak.
+        \emph{Digital Picture Processing}, 2nd ed.
+        Academic Press, 1982.
+  \item OpenCV Documentation: \texttt{SimpleBlobDetector}.
+        \url{https://docs.opencv.org/4.x/d0/d7a/classcv_1_1SimpleBlobDetector.html}
+  \item OpenCV Documentation: \texttt{threshold()}.
+        \url{https://docs.opencv.org/4.x/d7/d1b/group__imgproc__misc.html}
+\end{enumerate}
+
+\end{document}
